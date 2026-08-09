@@ -258,12 +258,12 @@ describe("registerBeforeCompactHook: compact-all path", () => {
 
     expect(userMessages).toEqual([]);
     expect(customMessages).toHaveLength(1);
-    expect(customMessages[0].options).toEqual({ triggerTurn: true });
+    expect(customMessages[0].options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
     expect(customMessages[0].message).toMatchObject({
       customType: "pi-vcc-auto-continue",
       display: false,
     });
-    expect(customMessages[0].message.content).toContain("Continue from where you left off");
+    expect(customMessages[0].message.content).toEqual([]);
   });
 
   test("successful overflow compact auto-continues by default with hidden custom message", async () => {
@@ -278,12 +278,12 @@ describe("registerBeforeCompactHook: compact-all path", () => {
 
     expect(userMessages).toEqual([]);
     expect(customMessages).toHaveLength(1);
-    expect(customMessages[0].options).toEqual({ triggerTurn: true });
+    expect(customMessages[0].options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
     expect(customMessages[0].message).toMatchObject({
       customType: "pi-vcc-auto-continue",
       display: false,
     });
-    expect(customMessages[0].message.content).toContain("Continue from where you left off");
+    expect(customMessages[0].message.content).toEqual([]);
   });
 
   test("threshold compact continuation is canceled when a real user prompt starts", async () => {

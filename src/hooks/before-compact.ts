@@ -35,11 +35,37 @@ export const OVERSIZED_TAIL_FACTOR = 2.5;
 let lastStats: CompactionStats | null = null;
 let lastCompactWasPiVcc = false;
 let pendingFollowUpPrompt: string | null = null;
-const AUTO_CONTINUE_CUSTOM_TYPE = "pi-vcc-auto-continue";
-const AUTO_CONTINUE_PROMPT = "Continue from where you left off after automatic context compaction. Do not restate the compaction summary; proceed with the task.";
 let pendingAutoContinueTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Invisible auto-continue: resume the agent after compaction without polluting
+// the LLM context with a user-visible continue prompt. triggerInvisibleContinue
+// sends a custom message marked with a dedicated customType (content:[],
+// display:false, triggerTurn:true, deliverAs:'followUp') so Pi's queue/busy-state
+// stays coherent; the on('context') filter registered in registerBeforeCompactHook
+// removes that message (by customType ONLY) from the LLM payload — the model
+// simply continues from the compaction summary.
+//
+// Ported from monotykamary/pi-vcc branch 'tom'
+// (https://github.com/monotykamary/pi-vcc, MIT) — a pi-vcc derivative.
+export const AUTO_CONTINUE_CUSTOM_TYPE = "pi-vcc-auto-continue";
+
+export const triggerInvisibleContinue = (pi: ExtensionAPI): void => {
+  pi.sendMessage(
+    {
+      customType: AUTO_CONTINUE_CUSTOM_TYPE,
+      content: [],
+      display: false,
+      details: undefined,
+    },
+    {
+      triggerTurn: true,
+      deliverAs: "followUp",
+    },
+  );
+};
+
 const clearPendingAutoContinue = () => {
+
   if (pendingAutoContinueTimer) {
     clearTimeout(pendingAutoContinueTimer);
     pendingAutoContinueTimer = null;
@@ -48,14 +74,10 @@ const clearPendingAutoContinue = () => {
 
 const scheduleAutoContinue = (pi: any) => {
   clearPendingAutoContinue();
-  pendingAutoContinueTimer = setTimeout(async () => {
+  pendingAutoContinueTimer = setTimeout(() => {
     pendingAutoContinueTimer = null;
     try {
-      await pi.sendMessage({
-        customType: AUTO_CONTINUE_CUSTOM_TYPE,
-        content: AUTO_CONTINUE_PROMPT,
-        display: false,
-      }, { triggerTurn: true });
+      triggerInvisibleContinue(pi);
     } catch {}
   }, 0);
 };
@@ -456,6 +478,16 @@ const REASON_MESSAGES: Record<OwnCutCancelReason, string> = {
 };
 
 export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
+  // Filter our invisible-continue marker out of the LLM context payload so the
+  // model just continues from the compaction summary (matched by customType ONLY).
+  pi.on("context", (event) => {
+    const messages = event.messages.filter((message) => {
+      if (message.role !== "custom") return true;
+      return message.customType !== AUTO_CONTINUE_CUSTOM_TYPE;
+    });
+    if (messages.length !== event.messages.length) return { messages };
+  });
+
   pi.on("before_agent_start", () => {
     clearPendingAutoContinue();
   });
