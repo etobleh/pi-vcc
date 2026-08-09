@@ -253,3 +253,32 @@ describe("formatTouchedOutput", () => {
     expect(formatTouchedOutput([])).toContain("No file operations found in session history.");
   });
 });
+describe("drill-down scope", () => {
+  it("blocks #N:path on off-lineage entries by default, allows with scope all", async () => {
+    const entries = [
+      toolMsg("m0", "edit", { path: "src/on.ts", oldText: "x", newText: "y" }),
+      toolMsg("m1", "edit", { path: "src/off.ts", oldText: "secret-old", newText: "secret-new" }),
+      toolMsg("m2", "edit", { path: "src/on.ts", oldText: "a", newText: "b" }),
+    ];
+    const { dir, file, ids } = makeSession(entries);
+    try {
+      const tool = register();
+      const lineage = ["m0", "m2"];
+
+      // off-lineage entry blocked under default scope
+      const blocked = await invoke(tool, file, ids, { query: "#1:off.ts" }, lineage);
+      expect(blocked).toContain("Cannot expand indices outside active lineage: 1");
+      expect(blocked).not.toContain("secret-old");
+
+      // on-lineage entry still drills under default scope
+      const onOut = await invoke(tool, file, ids, { query: "#2:on.ts" }, lineage);
+      expect(onOut).toContain("src/on.ts");
+
+      // scope:'all' reaches the other branch
+      const allOut = await invoke(tool, file, ids, { query: "#1:off.ts", scope: "all" });
+      expect(allOut).toContain("src/off.ts");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

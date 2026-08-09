@@ -62,11 +62,29 @@ export const registerRecallTool = (pi: ExtensionAPI) => {
         };
       }
 
+      const scope = normalizeRecallScope(params.scope);
+      const lineageEntryIds = scope === "lineage"
+        ? getActiveLineageEntryIds(ctx.sessionManager)
+        : undefined;
+
       // Drill-down: #N:path resolves to file-scoped tool content. Anchored so
       // inline mentions like "see #42:auth.ts" are never treated as drill-down.
+      // Honors scope like every other recall path: the target entry must be on
+      // the active lineage unless scope:'all'. Membership is checked against
+      // global indices; expandEntryFile keeps loading unfiltered so #N stays
+      // aligned with the global message index.
       const q = params.query?.trim();
       if (q && parseDrillDown(q)) {
         const parsed = parseDrillDown(q)!;
+        if (lineageEntryIds) {
+          const { rendered } = loadAllMessages(sessionFile, false, lineageEntryIds);
+          if (!rendered.some((m) => m.index === parsed.index)) {
+            return {
+              content: [{ type: "text", text: `Cannot expand indices outside active lineage: ${parsed.index}. Use scope:'all' to reach other branches.` }],
+              details: undefined,
+            };
+          }
+        }
         const text = expandEntryFile(
           sessionFile,
           parsed.index,
@@ -80,11 +98,6 @@ export const registerRecallTool = (pi: ExtensionAPI) => {
           details: undefined,
         };
       }
-
-      const scope = normalizeRecallScope(params.scope);
-      const lineageEntryIds = scope === "lineage"
-        ? getActiveLineageEntryIds(ctx.sessionManager)
-        : undefined;
 
       // touched mode: aggregate file operations across the live window.
       if (normalizeRecallMode(params.mode) === "touched") {
