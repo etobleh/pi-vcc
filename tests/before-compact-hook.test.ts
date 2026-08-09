@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } fr
 import { existsSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { registerBeforeCompactHook, PI_VCC_COMPACT_INSTRUCTION, getLastCompactionStats, formatCompactionStats } from "../src/hooks/before-compact";
+import { registerBeforeCompactHook, PI_VCC_COMPACT_INSTRUCTION, getLastCompactionStats, formatCompactionStats, buildOwnCut, applyTailBudget } from "../src/hooks/before-compact";
 
 let tmpDir: string;
 let CONFIG_PATH: string;
@@ -527,5 +527,182 @@ describe("registerBeforeCompactHook: compact-all path", () => {
       keptUserTurns: 0,
       totalUserTurns: 2,
     });
+  });
+});
+
+describe("applyTailBudget: token-budget tail cut (default path)", () => {
+  const big = (n: number) => "x".repeat(n);
+
+  test("Case A: no user anchor + oversized live window → non-compact-all budget cut (no_anchor)", () => {
+    const entries = [
+      msg("u1", "user", "go"),
+      msg("a1", "assistant", "tool"),
+      msg("t1", "toolResult", "res"),
+      msg("a2", "assistant", big(200_000)), // 50k tok at 4 chars/tok
+    ];
+    const cut = buildOwnCut(entries, 1);
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    expect(cut.compactAll).toBe(true);
+
+    const result = applyTailBudget(entries, cut, { charsPerToken: 4 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.compactAll).toBe(false);
+    expect(result.firstKeptEntryId).toBe("a2");
+    expect(result.firstKeptEntryId).not.toBe("");
+    expect(result.budgetCut).toBe("no_anchor");
+    const keptFirst = entries.find((e: any) => e.id === result.firstKeptEntryId)!;
+    expect(keptFirst.message.role).not.toBe("toolResult");
+  });
+
+  test("Case A small window: everything < budget → unchanged compact-all fallback", () => {
+    const entries = [
+      msg("u1", "user", "go"),
+      msg("a1", "assistant", "tool"),
+      msg("t1", "toolResult", "res"),
+      msg("a2", "assistant", "done"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    if (!cut.ok) return;
+    const result = applyTailBudget(entries, cut, { charsPerToken: 4 });
+    expect(result).toBe(cut); // returned unchanged
+    if (!result.ok) return;
+    expect(result.compactAll).toBe(true);
+    expect(result.firstKeptEntryId).toBe("");
+    expect(result.budgetCut).toBeUndefined();
+  });
+
+  test("Case B: oversized tail (>62.5k tok) re-cuts inside the last turn, not at toolResult", () => {
+    const entries = [
+      msg("u1", "user", "one"),
+      msg("a1", "assistant", "reply"),
+      msg("u2", "user", "two"),
+      msg("a2", "assistant", big(300_000)), // 75k tok at 4 chars/tok
+      msg("t1", "toolResult", "res"),
+      msg("a3", "assistant", "wrap"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    if (!cut.ok) return;
+    expect(cut.compactAll).toBe(false);
+    expect(cut.firstKeptEntryId).toBe("u2");
+
+    const result = applyTailBudget(entries, cut, { charsPerToken: 4 });
+    if (!result.ok) return;
+    expect(result.budgetCut).toBe("oversized_tail");
+    expect(result.compactAll).toBe(false);
+    expect(result.firstKeptEntryId).toBe("a2"); // cut landed inside the last turn
+    const keptFirst = entries.find((e: any) => e.id === result.firstKeptEntryId)!;
+    expect(keptFirst.message.role).toBe("assistant");
+  });
+
+  test("Case B tolerance: last turn ~37.5k tok → no budget cut", () => {
+    const entries = [
+      msg("u1", "user", "one"),
+      msg("a1", "assistant", "reply"),
+      msg("u2", "user", "two"),
+      msg("a2", "assistant", big(150_000)), // 37.5k tok at 4 chars/tok < 62.5k
+      msg("t1", "toolResult", "res"),
+      msg("a3", "assistant", "wrap"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    if (!cut.ok) return;
+    const result = applyTailBudget(entries, cut, { charsPerToken: 4 });
+    expect(result).toBe(cut); // tolerance zone: unchanged
+    if (!result.ok) return;
+    expect(result.budgetCut).toBeUndefined();
+    expect(result.firstKeptEntryId).toBe("u2");
+  });
+
+  test("toolResult snap: crossing lands on a toolResult → snapped forward to next non-toolResult", () => {
+    const entries = [
+      msg("u1", "user", "go"),
+      msg("a1", "assistant", "tool"),
+      msg("t1", "toolResult", big(200_000)), // crossing lands here
+      msg("a2", "assistant", "done"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    if (!cut.ok) return;
+    expect(cut.compactAll).toBe(true);
+    const result = applyTailBudget(entries, cut, { charsPerToken: 4 });
+    if (!result.ok) return;
+    expect(result.budgetCut).toBe("no_anchor");
+    expect(result.firstKeptEntryId).toBe("a2"); // snapped past the toolResult
+    const keptFirst = entries.find((e: any) => e.id === result.firstKeptEntryId)!;
+    expect(keptFirst.message.role).toBe("assistant");
+  });
+
+  test("formatCompactionStats renders both budget-cut notes", () => {
+    const base = {
+      summarized: 4,
+      kept: 2,
+      keptUserTurns: 0,
+      totalUserTurns: 1,
+      requestedKeepUserTurns: 1,
+      keepUserTurnsExplicit: false,
+      keepFallbackToCompactAll: false,
+      keptTokensEst: 5000,
+    };
+    expect(formatCompactionStats({ ...base, budgetCut: "no_anchor" })).toContain("budget cut: no user anchor");
+    expect(formatCompactionStats({ ...base, budgetCut: "oversized_tail" })).toContain("budget cut: oversized tail");
+  });
+});
+
+describe("registerBeforeCompactHook: budget-cut hook integration", () => {
+  beforeEach(() => {
+    if (existsSync(DEBUG_PATH)) unlinkSync(DEBUG_PATH);
+  });
+  afterEach(() => {
+    if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
+    if (existsSync(DEBUG_PATH)) unlinkSync(DEBUG_PATH);
+  });
+
+  test("Case A default path: no_anchor budget cut keeps a tail and sets stats", () => {
+    setConfig({ debug: false, overrideDefaultCompaction: false });
+    const { pi, invokeBefore } = createMockPi();
+    registerBeforeCompactHook(pi);
+    const entries = [
+      msg("u1", "user", "go"),
+      msg("a1", "assistant", "tool"),
+      msg("t1", "toolResult", "res"),
+      msg("a2", "assistant", "x".repeat(200_000)),
+    ];
+    const result = invokeBefore(makeEvent(entries, PI_VCC_COMPACT_INSTRUCTION));
+    expect(result.cancel).toBeUndefined();
+    expect(result.compaction.firstKeptEntryId).not.toBe("");
+    expect(getLastCompactionStats()!.budgetCut).toBe("no_anchor");
+  });
+
+  test("Case A small window: unchanged compact-all fallback and no budgetCut", () => {
+    setConfig({ debug: false, overrideDefaultCompaction: false });
+    const { pi, invokeBefore } = createMockPi();
+    registerBeforeCompactHook(pi);
+    const entries = [
+      msg("u1", "user", "go"),
+      msg("a1", "assistant", "tool"),
+      msg("t1", "toolResult", "res"),
+      msg("a2", "assistant", "done"),
+    ];
+    const result = invokeBefore(makeEvent(entries, PI_VCC_COMPACT_INSTRUCTION));
+    expect(result.compaction.firstKeptEntryId).toBe("");
+    expect(getLastCompactionStats()!.budgetCut).toBeUndefined();
+  });
+
+  test("Explicit keep:N with giant last turn is untouched (no budgetCut)", () => {
+    setConfig({ debug: false, overrideDefaultCompaction: false });
+    const { pi, invokeBefore } = createMockPi();
+    registerBeforeCompactHook(pi);
+    const entries = [
+      msg("u1", "user", "one"),
+      msg("a1", "assistant", "reply"),
+      msg("u2", "user", "two"),
+      msg("a2", "assistant", "x".repeat(300_000)),
+      msg("u3", "user", "three"),
+      msg("a3", "assistant", "reply three"),
+    ];
+    const result = invokeBefore(makeEvent(entries, `${PI_VCC_COMPACT_INSTRUCTION} keep:2`));
+    expect(result.compaction.firstKeptEntryId).toBe("u2");
+    expect(getLastCompactionStats()!.budgetCut).toBeUndefined();
+    expect(getLastCompactionStats()!.keepUserTurnsExplicit).toBe(true);
   });
 });

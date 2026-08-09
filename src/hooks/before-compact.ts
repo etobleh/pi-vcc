@@ -4,7 +4,7 @@ import { writeFileSync } from "fs";
 import { compileRanked } from "../core/summarize";
 import { parseKeepAndPrompt, PI_VCC_COMPACT_INSTRUCTION } from "../core/compact-args";
 import { loadSettings, type PiVccSettings } from "../core/settings";
-import { calibrateCharsPerToken, estimateMessageContentChars, estimateTokensFromChars } from "../core/token-estimate";
+import { calibrateCharsPerToken, estimateMessageContentChars, estimateMessageContentTokens, estimateTokensFromChars } from "../core/token-estimate";
 import type { PiVccCompactionDetails } from "../details";
 import type { CompactionReason } from "../types";
 
@@ -18,6 +18,8 @@ export interface CompactionStats {
   requestedKeepUserTurns: number;
   keepUserTurnsExplicit: boolean;
   keepFallbackToCompactAll: boolean;
+  /** Set when the tail came from a token-budget cut instead of a user-turn cut. */
+  budgetCut?: BudgetCutKind;
   keptTokensEst: number;
   /** True when smart-keep boosted the default keep beyond 1. */
   smartKeepAdjusted?: boolean;
@@ -26,6 +28,9 @@ export interface CompactionStats {
   reason?: CompactionReason;
   willRetry?: boolean;
 }
+
+export type BudgetCutKind = "no_anchor" | "oversized_tail";
+export const OVERSIZED_TAIL_FACTOR = 2.5;
 
 let lastStats: CompactionStats | null = null;
 let lastCompactWasPiVcc = false;
@@ -66,6 +71,12 @@ export const formatCompactionStats = (stats: CompactionStats): string => {
   const notes: string[] = [`summarized ${stats.summarized}`];
   if (stats.smartKeepAdjusted) {
     notes.push("smart-keep");
+  }
+  if (stats.budgetCut === "no_anchor") {
+    notes.push("budget cut: no user anchor");
+  }
+  if (stats.budgetCut === "oversized_tail") {
+    notes.push("budget cut: oversized tail");
   }
   return `pi-vcc: kept ${stats.keptUserTurns}/${stats.totalUserTurns} turns, ~${formatTokens(stats.keptTokensEst)} tok (${notes.join(", ")}).`;
 };
@@ -166,11 +177,11 @@ export type OwnCutResult =
       totalUserTurns: number;
       requestedKeepUserTurns: number;
       keepFallbackToCompactAll: boolean;
+      budgetCut?: BudgetCutKind;
     }
   | { ok: false; reason: OwnCutCancelReason };
 
-export function buildOwnCut(branchEntries: any[], keepUserTurns = 1): OwnCutResult {
-  const normalizedKeepUserTurns = normalizeKeepUserTurns(keepUserTurns);
+const collectLiveMessages = (branchEntries: any[]): EntryWithMessage[] => {
   // Find the last compaction entry and its firstKeptEntryId
   let lastCompactionIdx = -1;
   let lastKeptId: string | undefined;
@@ -210,6 +221,12 @@ export function buildOwnCut(branchEntries: any[], keepUserTurns = 1): OwnCutResu
       }
     }
   }
+  return liveMessages;
+};
+
+export function buildOwnCut(branchEntries: any[], keepUserTurns = 1): OwnCutResult {
+  const normalizedKeepUserTurns = normalizeKeepUserTurns(keepUserTurns);
+  const liveMessages = collectLiveMessages(branchEntries);
 
   if (liveMessages.length === 0) return { ok: false, reason: "no_live_messages" };
   if (liveMessages.length <= 2) return { ok: false, reason: "too_few_live_messages" };
@@ -254,6 +271,76 @@ export function buildOwnCut(branchEntries: any[], keepUserTurns = 1): OwnCutResu
     keepFallbackToCompactAll: false,
   };
 }
+
+// Token-budget tail cut: rescue default-path sessions when the user-turn
+// anchored tail is absent (autonomous: no user boundary in the live window)
+// or oversized (a single giant last user turn). Cuts at the nearest valid
+// non-toolResult boundary, mirroring pi-core's findCutPoint.
+export const findBudgetCutIndex = (
+  live: EntryWithMessage[],
+  maxTokens: number,
+  charsPerToken?: number,
+): number => {
+  let acc = 0;
+  let crossed = -1;
+  for (let i = live.length - 1; i >= 0; i--) {
+    acc += estimateMessageContentTokens(live[i].message.content, charsPerToken);
+    if (acc >= maxTokens) {
+      crossed = i;
+      break;
+    }
+  }
+  if (crossed < 0) return -1;
+  // Snap forward off any toolResult to the next valid boundary.
+  for (let j = Math.max(crossed, 1); j < live.length; j++) {
+    if (live[j].message.role !== "toolResult") return j;
+  }
+  return -1;
+};
+
+export const applyTailBudget = (
+  branchEntries: any[],
+  cut: OwnCutResult,
+  opts: { maxTokens?: number; oversizedFactor?: number; charsPerToken?: number } = {},
+): OwnCutResult => {
+  if (!cut.ok) return cut;
+  const maxTokens = opts.maxTokens ?? MAX_SMART_TAIL_TOKENS;
+  const factor = opts.oversizedFactor ?? OVERSIZED_TAIL_FACTOR;
+  const live = collectLiveMessages(branchEntries);
+
+  const budgetResult = (idx: number, budgetCut: BudgetCutKind): OwnCutResult => ({
+    ok: true,
+    messages: live.slice(0, idx).map((m) => m.message),
+    firstKeptEntryId: live[idx].entry.id,
+    compactAll: false,
+    keptUserTurns: live.slice(idx).filter((m) => m.message.role === "user").length,
+    totalUserTurns: live.filter((m) => m.message.role === "user").length,
+    requestedKeepUserTurns: cut.requestedKeepUserTurns,
+    keepFallbackToCompactAll: false,
+    budgetCut,
+  });
+
+  // Case A: no user anchor → compact-all. Re-cut to a token budget unless the
+  // compact-all came from explicit keep:0 (which must be respected absolutely).
+  if (cut.compactAll) {
+    if (!cut.keepFallbackToCompactAll) return cut;
+    const idx = findBudgetCutIndex(live, maxTokens, opts.charsPerToken);
+    if (idx < 0) return cut;
+    return budgetResult(idx, "no_anchor");
+  }
+
+  // Case B: oversized user-boundary tail. Only re-cut when the kept tail exceeds
+  // maxTokens * factor (tolerance zone below is unchanged).
+  const tailStart = cut.messages.length; // equals the cut index in the live window
+  let tailTokens = 0;
+  for (let i = tailStart; i < live.length; i++) {
+    tailTokens += estimateMessageContentTokens(live[i].message.content, opts.charsPerToken);
+  }
+  if (tailTokens <= maxTokens * factor) return cut;
+  const idx = findBudgetCutIndex(live, maxTokens, opts.charsPerToken);
+  if (idx <= tailStart) return cut;
+  return budgetResult(idx, "oversized_tail");
+};
 
 // ── smart keep-tail: boost default keep when tail is small ──
 
@@ -385,7 +472,12 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       smartKeepTail: settings.smartKeepTail,
       charsPerToken: tokenEstimate.charsPerToken,
     });
-    const ownCut = buildOwnCut(branchEntries as any[], smartKeep.keepUserTurns);
+    let ownCut = buildOwnCut(branchEntries as any[], smartKeep.keepUserTurns);
+    // Default path only: rescue autonomous / oversized-tail sessions with a
+    // token-budget cut. Explicit keep:N is respected absolutely (no-op here).
+    if (ownCut.ok && !keepUserTurnsExplicit) {
+      ownCut = applyTailBudget(branchEntries as any[], ownCut, { charsPerToken: tokenEstimate.charsPerToken });
+    }
     if (!ownCut.ok) {
       const lastComp = [...branchEntries].reverse().find((e: any) => e.type === "compaction");
       const lastCompIdx = lastComp ? (branchEntries as any[]).indexOf(lastComp) : -1;
@@ -482,6 +574,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       keptTokensEst: estimateTokensFromChars(keptChars, tokenEstimate.charsPerToken),
       smartKeepAdjusted: smartKeep.smartAdjusted,
       smartFromKeep: smartKeep.fromKeep,
+      budgetCut: ownCut.ok ? ownCut.budgetCut : undefined,
       reason,
       willRetry,
     };
@@ -534,6 +627,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
 
     dbg(config, {
       usedOwnCut: true,
+      budgetCut: ownCut.budgetCut,
       compaction: { reason, willRetry },
       messagesToSummarize: agentMessages.length,
       messagesPreviewHead: agentMessages.slice(0, 3).map((m: any) => ({ role: m.role, preview: previewContent(m.content) })),
