@@ -163,6 +163,33 @@ interface EntryWithMessage {
   message: { role: string; content: unknown };
 }
 
+// Convert a non-message entry that carries LLM-context text (custom_message /
+// branch_summary) into its agent-message form, mirroring pi-core's
+// createCustomMessage / createBranchSummaryMessage (not root-exported, so inlined).
+const toLiveMessage = (entry: any): { role: string; content: unknown; [key: string]: unknown } | null => {
+  if (entry.type === "message" && entry.message) return entry.message;
+  if (entry.type === "custom_message") {
+    return {
+      role: "custom",
+      customType: entry.customType,
+      content: entry.content,
+      display: entry.display,
+      details: entry.details,
+      timestamp: entry.timestamp != null ? new Date(entry.timestamp).getTime() : undefined,
+    };
+  }
+  if (entry.type === "branch_summary") {
+    return {
+      role: "branchSummary",
+      summary: entry.summary,
+      fromId: entry.fromId,
+      content: undefined,
+      timestamp: entry.timestamp != null ? new Date(entry.timestamp).getTime() : undefined,
+    };
+  }
+  return null;
+};
+
 export type OwnCutCancelReason =
   | "no_live_messages"
   | "too_few_live_messages";
@@ -206,9 +233,8 @@ const collectLiveMessages = (branchEntries: any[]): EntryWithMessage[] => {
     for (let i = lastCompactionIdx + 1; i < branchEntries.length; i++) {
       const e = branchEntries[i];
       if (e.type === "compaction") continue;
-      if (e.type === "message" && e.message) {
-        liveMessages.push({ entry: e, message: e.message });
-      }
+      const m = toLiveMessage(e);
+      if (m) liveMessages.push({ entry: e, message: m });
     }
   } else {
     let foundKept = !lastKeptId; // if no prior compaction, start collecting immediately
@@ -216,9 +242,8 @@ const collectLiveMessages = (branchEntries: any[]): EntryWithMessage[] => {
       if (!foundKept && e.id === lastKeptId) foundKept = true;
       if (!foundKept) continue;
       if (e.type === "compaction") continue;
-      if (e.type === "message" && e.message) {
-        liveMessages.push({ entry: e, message: e.message });
-      }
+      const m = toLiveMessage(e);
+      if (m) liveMessages.push({ entry: e, message: m });
     }
   }
   return liveMessages;

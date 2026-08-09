@@ -83,6 +83,8 @@ const msg = (id: string, role: "user" | "assistant" | "toolResult", content = "x
   message: { role, content },
 });
 const comp = (id: string, firstKeptEntryId?: string) => ({ id, type: "compaction", firstKeptEntryId });
+const custom = (id: string, customType: string, content: string | unknown[], extra: Record<string, unknown> = {}) => ({ id, type: "custom_message", customType, content, display: false, timestamp: "2026-01-01T00:00:00.000Z", ...extra });
+const branchSummary = (id: string, summary: string, fromId = "f1") => ({ id, type: "branch_summary", summary, fromId, timestamp: "2026-01-01T00:00:00.000Z" });
  
 describe("registerBeforeCompactHook: cancel paths", () => {
   beforeEach(() => {
@@ -704,5 +706,126 @@ describe("registerBeforeCompactHook: budget-cut hook integration", () => {
     expect(result.compaction.firstKeptEntryId).toBe("u2");
     expect(getLastCompactionStats()!.budgetCut).toBeUndefined();
     expect(getLastCompactionStats()!.keepUserTurnsExplicit).toBe(true);
+  });
+});
+
+describe("collectLiveMessages: custom_message / branch_summary entries", () => {
+  test("custom_message in the summarized prefix is carried into the summarizer input", () => {
+    const entries = [
+      msg("u1", "user", "go"),
+      msg("a1", "assistant", "reply"),
+      custom("c1", "memory-inject", "CUSTOM_CTX_MARKER_123"),
+      msg("u2", "user", "next"),
+      msg("a2", "assistant", "done"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    // keep:1 → cut at u2, so the summarized prefix is [u1, a1, c1]
+    expect(cut.firstKeptEntryId).toBe("u2");
+    const summarized = cut.messages.map((m: any) => m.content);
+    expect(summarized).toContain("CUSTOM_CTX_MARKER_123");
+    const customMsg = cut.messages.find((m: any) => m.role === "custom");
+    expect(customMsg).toBeDefined();
+    expect(customMsg.customType).toBe("memory-inject");
+  });
+
+  test("custom_message is NOT counted as a user turn", () => {
+    const entries = [
+      msg("u1", "user", "one"),
+      custom("c1", "ctx", "injected"),
+      msg("a1", "assistant", "reply one"),
+      msg("u2", "user", "two"),
+      msg("a2", "assistant", "reply two"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    expect(cut.totalUserTurns).toBe(2); // custom not counted
+    expect(cut.keptUserTurns).toBe(1);
+  });
+
+  test("branch_summary entry is included and not counted as a user turn", () => {
+    const entries = [
+      branchSummary("bs1", "BRANCH_SUMMARY_MARKER"),
+      msg("u1", "user", "one"),
+      msg("a1", "assistant", "reply one"),
+      msg("u2", "user", "two"),
+      msg("a2", "assistant", "reply two"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    expect(cut.totalUserTurns).toBe(2); // branch_summary not counted
+    const prefix = cut.messages.map((m: any) => m.content ?? m.summary);
+    expect(prefix).toContain("BRANCH_SUMMARY_MARKER");
+    const bsMsg = cut.messages.find((m: any) => m.role === "branchSummary");
+    expect(bsMsg).toBeDefined();
+    expect(bsMsg.summary).toBe("BRANCH_SUMMARY_MARKER");
+  });
+
+  test("budget cut may land on a custom message (valid non-toolResult boundary)", () => {
+    const entries = [
+      msg("u1", "user", "go"),
+      custom("c1", "ctx", "x".repeat(200_000)), // huge custom message
+      msg("a1", "assistant", "wrap"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    expect(cut.compactAll).toBe(true); // no user anchor → case A
+    const result = applyTailBudget(entries, cut, { charsPerToken: 4 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.budgetCut).toBe("no_anchor");
+    expect(result.firstKeptEntryId).toBe("c1"); // cut landed on the custom message
+    const keptFirst = entries.find((e: any) => e.id === result.firstKeptEntryId)!;
+    expect(keptFirst.type).toBe("custom_message");
+  });
+
+  test("orphan-recovery window containing custom_message keeps it in the live window", () => {
+    const entries = [
+      comp("pc", "ghost-id"), // prior compaction with a no-longer-valid kept id
+      custom("c1", "ctx", "ORPHAN_CUSTOM_MARKER"),
+      msg("a1", "assistant", "reply"),
+      msg("u1", "user", "go"),
+      msg("a2", "assistant", "done"),
+    ];
+    const cut = buildOwnCut(entries, 1);
+    expect(cut.ok).toBe(true);
+    if (!cut.ok) return;
+    // orphan recovery collects from after the last compaction → custom is included
+    const summarized = cut.messages.map((m: any) => m.content).join("");
+    expect(summarized).toContain("ORPHAN_CUSTOM_MARKER");
+    expect(cut.totalUserTurns).toBe(1);
+  });
+});
+
+describe("registerBeforeCompactHook: custom_message reaches the summarizer", () => {
+  beforeEach(() => {
+    if (existsSync(DEBUG_PATH)) unlinkSync(DEBUG_PATH);
+  });
+  afterEach(() => {
+    if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
+    if (existsSync(DEBUG_PATH)) unlinkSync(DEBUG_PATH);
+  });
+
+  test("custom message content appears in the debug summarize-input preview", () => {
+    setConfig({ debug: true, overrideDefaultCompaction: false });
+    const { pi, invokeBefore } = createMockPi();
+    registerBeforeCompactHook(pi);
+    const entries = [
+      custom("c1", "memory-inject", "INJECTED_CTX_9999"),
+      msg("u1", "user", "go"),
+      msg("a1", "assistant", "reply"),
+      msg("u2", "user", "next"),
+      msg("a2", "assistant", "done"),
+    ];
+    const result = invokeBefore(makeEvent(entries, PI_VCC_COMPACT_INSTRUCTION));
+    expect(result.cancel).toBeUndefined();
+    expect(existsSync(DEBUG_PATH)).toBe(true);
+    const snapshot = JSON.parse(readFileSync(DEBUG_PATH, "utf-8"));
+    expect(snapshot.usedOwnCut).toBe(true);
+    expect(JSON.stringify(snapshot)).toContain("INJECTED_CTX_9999");
   });
 });
