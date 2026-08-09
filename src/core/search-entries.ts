@@ -1,6 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import type { RenderedEntry } from "./render-entries";
-import { textOf } from "./content";
+import { textOf, isContentBearing, extractToolCallText } from "./content";
 
 export interface SearchHit extends RenderedEntry {
   /** Context snippet around the first matched term (only when query provided) */
@@ -8,7 +8,17 @@ export interface SearchHit extends RenderedEntry {
   /** Number of query terms matched (for ranking) */
   matchCount?: number;
 }
+/** A file touched in one entry — used by mode:touched aggregation. */
+export interface FileTouch {
+  index: number;
+  toolName: string;
+}
 
+/** Aggregated view of a file touched across multiple entries. */
+export interface TouchedFile {
+  path: string;
+  entries: FileTouch[];
+}
 const escapeRegex = (s: string): string =>
   s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -219,6 +229,59 @@ const fullText = (msg: Message): string => {
   }
   return textOf(msg.content);
 };
+
+/**
+ * Compute file indicators from a message, counting non-empty content lines
+ * per content-bearing file call. Shape-based — no tool-name allowlist.
+ *
+ * Ported from pi-blackhole (https://github.com/k0valik/pi-blackhole, MIT) by
+ * k0valik — a pi-vcc derivative.
+ */
+export function getFileIndicators(msg: Message): { toolName: string; path: string; lineCount: number }[] {
+  if (!msg?.content || typeof msg.content === "string") return [];
+  const indicators: { toolName: string; path: string; lineCount: number }[] = [];
+  for (const part of msg.content) {
+    if (!part || typeof part !== "object" || part.type !== "toolCall") continue;
+    const args = part.arguments as Record<string, unknown>;
+    if (!isContentBearing(args)) continue;
+    const path = ["path", "filePath", "file_path", "file"]
+      .map((k) => args[k])
+      .find((v): v is string => typeof v === "string")!;
+    const totalText = extractToolCallText(args);
+    const nonEmpty = totalText.split("\n").filter((l) => l.trim().length > 0);
+    indicators.push({
+      toolName: part.name || "",
+      path,
+      lineCount: nonEmpty.length,
+    });
+  }
+  return indicators;
+}
+
+/**
+ * Aggregate file operations across all entries for mode:touched.
+ *
+ * Ported from pi-blackhole (https://github.com/k0valik/pi-blackhole, MIT) by
+ * k0valik — a pi-vcc derivative.
+ */
+export function getTouchedFiles(
+  messages: Message[],
+  rendered: RenderedEntry[],
+): TouchedFile[] {
+  const map = new Map<string, TouchedFile>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const indicators = getFileIndicators(msg);
+    for (const fm of indicators) {
+      const index = rendered[i]?.index ?? i;
+      if (!map.has(fm.path)) {
+        map.set(fm.path, { path: fm.path, entries: [] });
+      }
+      (map.get(fm.path) as TouchedFile).entries.push({ index, toolName: fm.toolName });
+    }
+  }
+  return Array.from(map.values());
+}
 
 export const searchEntries = (
   entries: RenderedEntry[],
