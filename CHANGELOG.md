@@ -2,6 +2,26 @@
 
 All notable changes to `@sting8k/pi-vcc` are documented in this file.
 
+## [0.6.0]
+
+### Features
+
+- **Recall `mode:"touched"` — file activity index** — answers the question agents actually ask after a compaction ("did I already edit this file, and what did I do?"). One call returns every file touched in the session mapped to the entries that touched it (`./src/core/config-manager.ts    #155 (quick_edit), #157 (edit)`), sorted by recency and paged. Classification is shape-based (a call counts when its arguments carry a path plus `content`/`edits`/`oldText`/`newText`), so custom edit tools are recognised without a tool-name allowlist and reads never pollute the index. Indices are the same global message indices `expand` uses. Ported from [pi-blackhole](https://github.com/k0valik/pi-blackhole).
+- **Recall `#N:path` drill-down** — expands the file-scoped content of a single operation inside an entry (`#155:config-manager`, `:full`, or `:offset:limit` for long files), instead of the summarised `quick_edit(path=…)` line `expand` used to return. `#N` alone lists the file operations in that entry. The pattern is anchored, so an inline mention such as "see #42:auth.ts" is still an ordinary search. Ported from [pi-blackhole](https://github.com/k0valik/pi-blackhole).
+
+### Changes
+
+- **Invisible auto-continue** — the prompt sent after a compaction is now a custom message with empty content delivered as a follow-up (`triggerTurn`, `deliverAs:"followUp"`) and filtered out of the LLM payload by a `context` hook, instead of a user-role prompt that stayed in context for the rest of the session. Same gating, same timing, no per-compaction context cost. Pattern ported from [monotykamary/pi-vcc](https://github.com/monotykamary/pi-vcc) (`tom` branch).
+- **Compaction toast reports tail tokens on budget cuts** — a budget cut keeps no whole user turn, so the old line read `kept 0/1 turns` and looked like everything was lost. It now leads with what is actually kept: `kept ~18.2k tok tail (mid-turn cut, no user anchor), summarized 42`. Turn-anchored cuts are unchanged.
+
+### Fixes
+
+- **Compaction: token-budget tail cut for autonomous sessions** — the tail was anchored exclusively to user-message boundaries, which breaks when a session has one user prompt and then runs on its own. With no boundary to keep, the hook fell back to compacting everything (`firstKeptEntryId` empty), orphan recovery rebuilt a window whose only user message was again at index 0, and every subsequent compaction repeated it: the working tail was lost every time, for the rest of the run. Measured on 755 real sessions, 21.7% hit this path. The default path now falls back to a token budget, cutting at the nearest non-`toolResult` boundary (never inside a `toolCall`/`toolResult` pair), mirroring pi core's `findCutPoint` semantics. The mirror case is handled too: a tail larger than 62.5k tokens (2.5x the 25k budget) is re-cut to roughly the budget, so a compaction that used to free almost nothing now does. Explicit `keep:N` is respected absolutely and is never re-cut. Audit on the same corpus: 43 of 43 rescuable sessions keep a tail (median 21.7k tokens) instead of none, 16 of 17 oversized tails drop from a median 73k to 20k tokens, and weighted fact recall for the rescued group rises 0.558 → 0.909. The 682 unaffected sessions are bit-identical.
+- **Compaction: `custom_message` and `branch_summary` reached the summariser** — the live window only collected `type: "message"` entries, so anything an extension injected through `sendMessage` (including pi-vcc's own auto-continue) was invisible: not counted, and never passed to the summariser, so its content disappeared silently at every compaction. Both entry types are now converted to their message form in the live window, matching pi core, which treats them as user-role messages. Turn counting still counts only real user messages, so `keep:N` anchoring is unchanged.
+- **Recall: `#N:path` drill-down honours `scope`** — the drill-down branch dispatched before scope resolution and read the session unfiltered, making it the one recall path that could return entries from abandoned branches without `scope:"all"`. The target entry is now checked against the active lineage by global index; `expandEntryFile` still loads unfiltered so `#N` stays aligned with the global message index. The same issue exists upstream in pi-blackhole and has been reported there.
+
+Known trade-off: when an oversized tail is re-cut, facts that live in `toolResult` blocks cannot be expressed in the brief (ranking skips those blocks), so that group loses a median 0.049 weighted recall in exchange for freeing ~50k tokens per session. Raising the brief ceiling and block budget was tested and made no difference; a dedicated failures section is the actual fix and is planned. Known limit: a single message at or above the budget cannot be cut around (1 of 755 sessions).
+
 ## [0.5.0]
 
 ### Changes
