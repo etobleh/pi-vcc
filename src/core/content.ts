@@ -1,4 +1,5 @@
 import type { Message } from "@earendil-works/pi-ai";
+import { PATH_KEYS } from "./tool-args";
 
 export const clip = (text: string, max = 200): string => {
   if (text.length <= max) return text;
@@ -47,6 +48,71 @@ export const textParts = (content: Message["content"]): string[] => {
 
 export const textOf = (content: Message["content"]): string =>
   textParts(content).join("\n");
+
+/**
+ * Check if tool call arguments contain content-bearing data.
+ *
+ * A call is content-bearing if it has a path argument AND at least one
+ * large string/array field (content, edits, oldText, newText).
+ * This is a generic heuristic — not dependent on tool names.
+ *
+ * Ported from pi-blackhole (https://github.com/k0valik/pi-blackhole, MIT) by
+ * k0valik — a pi-vcc derivative.
+ */
+export const isContentBearing = (args: Record<string, unknown>): boolean => {
+  if (!args || typeof args !== "object") return false;
+  // Must have a path in one of the known keys
+  const hasPath = PATH_KEYS.some((k) => typeof args[k] === "string");
+  if (!hasPath) return false;
+  // Must have at least one content-bearing field
+  if (typeof args.content === "string" && args.content.length > 0) return true;
+  // edits must be a non-empty array of objects (each with oldText/newText)
+  if (
+    Array.isArray(args.edits) &&
+    args.edits.length > 0 &&
+    args.edits.every((e) => typeof e === "object" && e !== null)
+  )
+    return true;
+  // oldText/newText without edits are content-bearing
+  if (
+    typeof args.oldText === "string" &&
+    args.oldText.length > 0 &&
+    args.edits === undefined
+  )
+    return true;
+  if (
+    typeof args.newText === "string" &&
+    args.newText.length > 0 &&
+    args.edits === undefined
+  )
+    return true;
+  return false;
+};
+
+/**
+ * Extract textual content from tool call arguments (content, edits,
+ * oldText, newText). Used for counting touched-file lines and search.
+ *
+ * Ported from pi-blackhole (https://github.com/k0valik/pi-blackhole, MIT) by
+ * k0valik — a pi-vcc derivative.
+ */
+export const extractToolCallText = (args: Record<string, unknown>): string => {
+  let text = "";
+  if (typeof args.content === "string") text += args.content + "\n";
+  if (Array.isArray(args.edits)) {
+    for (const edit of args.edits) {
+      if (edit && typeof edit === "object") {
+        if (typeof edit.oldText === "string") text += edit.oldText + "\n";
+        if (typeof edit.newText === "string") text += edit.newText + "\n";
+      }
+    }
+  }
+  if (typeof args.oldText === "string" && !Array.isArray(args.edits))
+    text += args.oldText + "\n";
+  if (typeof args.newText === "string" && !Array.isArray(args.edits))
+    text += args.newText + "\n";
+  return text;
+};
 
 /** Extract a snippet of ~`radius` chars around the first match of `term` in `text`. */
 export const snippet = (text: string, term: string, radius = 60): string | null => {
