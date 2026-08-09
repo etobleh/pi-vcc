@@ -634,7 +634,7 @@ describe("applyTailBudget: token-budget tail cut (default path)", () => {
     expect(keptFirst.message.role).toBe("assistant");
   });
 
-  test("formatCompactionStats renders both budget-cut notes", () => {
+  test("formatCompactionStats leads with tail tokens for budget cuts", () => {
     const base = {
       summarized: 4,
       kept: 2,
@@ -645,8 +645,8 @@ describe("applyTailBudget: token-budget tail cut (default path)", () => {
       keepFallbackToCompactAll: false,
       keptTokensEst: 5000,
     };
-    expect(formatCompactionStats({ ...base, budgetCut: "no_anchor" })).toContain("budget cut: no user anchor");
-    expect(formatCompactionStats({ ...base, budgetCut: "oversized_tail" })).toContain("budget cut: oversized tail");
+    expect(formatCompactionStats({ ...base, budgetCut: "no_anchor" })).toBe("pi-vcc: kept ~5.0k tok tail (mid-turn cut, no user anchor), summarized 4.");
+    expect(formatCompactionStats({ ...base, budgetCut: "oversized_tail" })).toBe("pi-vcc: kept ~5.0k tok tail (mid-turn cut, oversized tail), summarized 4.");
   });
 });
 

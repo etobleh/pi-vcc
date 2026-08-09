@@ -68,15 +68,13 @@ const formatTokens = (n: number): string => {
 };
 
 export const formatCompactionStats = (stats: CompactionStats): string => {
+  if (stats.budgetCut) {
+    const reason = stats.budgetCut === "no_anchor" ? "no user anchor" : "oversized tail";
+    return `pi-vcc: kept ~${formatTokens(stats.keptTokensEst)} tok tail (mid-turn cut, ${reason}), summarized ${stats.summarized}.`;
+  }
   const notes: string[] = [`summarized ${stats.summarized}`];
   if (stats.smartKeepAdjusted) {
     notes.push("smart-keep");
-  }
-  if (stats.budgetCut === "no_anchor") {
-    notes.push("budget cut: no user anchor");
-  }
-  if (stats.budgetCut === "oversized_tail") {
-    notes.push("budget cut: oversized tail");
   }
   return `pi-vcc: kept ${stats.keptUserTurns}/${stats.totalUserTurns} turns, ~${formatTokens(stats.keptTokensEst)} tok (${notes.join(", ")}).`;
 };
