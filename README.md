@@ -173,6 +173,14 @@ Local benchmarks / research comparing the ranked brief against the shipped pi-vc
 - [VCC](https://github.com/lllyasviel/VCC) — the original transcript-preserving conversation compiler
 - [Pi](https://github.com/badlogic/pi-mono) — the AI coding agent this extension is built for
 
+## Acknowledgments
+
+- Recall `mode:"touched"` + `#N:path` drill-down ported from
+  [pi-blackhole](https://github.com/k0valik/pi-blackhole) by [@k0valik](https://github.com/k0valik),
+  who also suggested the feature.
+- Invisible auto-continue pattern ported from
+  [monotykamary/pi-vcc](https://github.com/monotykamary/pi-vcc) (`tom` branch) by [@monotykamary](https://github.com/monotykamary).
+
 ## License
 
 MIT
