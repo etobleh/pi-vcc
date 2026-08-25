@@ -157,10 +157,16 @@ export const registerRecallTool = (pi: ExtensionAPI) => {
         // isn't reachable. Say so explicitly instead of falling through to
         // formatRecallOutput's zero-hit message, which would be false here.
         if (hits.length > 0 && page > totalPages) {
+          // truncationNote already ends in "...refine your query" when the
+          // hard cap kicked in — don't repeat that suggestion here, just say
+          // which pages exist. Only add "or refine your query" when there's
+          // no truncation note to have said it already.
+          const guidance = truncated
+            ? `Use a page between 1 and ${totalPages}.`
+            : `Use a page between 1 and ${totalPages}, or refine your query.`;
           const text =
             `Page ${page} is outside the available range 1-${totalPages} ` +
-            `(${hits.length} matches${scopeSuffix}${truncationNote}). ` +
-            `Use a page between 1 and ${totalPages}, or refine your query.`;
+            `(${hits.length} matches${scopeSuffix}${truncationNote}). ${guidance}`;
           return {
             content: [{ type: "text", text }],
             details: undefined,

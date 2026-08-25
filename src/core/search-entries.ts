@@ -454,9 +454,19 @@ const applyRelativeFloor = (
   return scored.filter((s) => s.score >= topScore * floor);
 };
 
-/** Bound `hits` to `cap` entries (order preserved), reporting the pre-cap
- *  count so callers can signal truncation honestly instead of understating
- *  "total matches". */
+/**
+ * Bound `hits` to `cap` entries, reporting the pre-cap count so callers can
+ * signal truncation honestly instead of understating "total matches".
+ *
+ * Order preserved, never re-sorted: for the BM25 path that's already
+ * highest-score-first, so `slice(0, cap)` keeps the top `cap` hits. For the
+ * regex path there is no score — hits are collected in entry/chronological
+ * iteration order, so `slice(0, cap)` keeps the OLDEST `cap` matches, not
+ * the most recent or most relevant ones. That is an explicit, documented
+ * preservation choice for this change, not a new selection/ranking policy —
+ * changing which matches a truncated regex search keeps (e.g. newest-first)
+ * is a separate decision, out of scope here.
+ */
 const capHits = (hits: SearchHit[], cap: number): SearchResult => {
   const totalBeforeCap = hits.length;
   const capped = totalBeforeCap > cap ? hits.slice(0, cap) : hits;

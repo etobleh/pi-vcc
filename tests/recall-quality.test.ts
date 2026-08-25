@@ -88,6 +88,10 @@ describe("vcc_recall pagination and hard-cap truncation signaling", () => {
       expect(output).toContain("Page 11 is outside the available range 1-10");
       expect(output).toContain("50 matches");
       expect(output).not.toContain("No matches");
+      // Cosmetic: this result IS truncated, so "refine your query" comes
+      // once from the truncation note — the out-of-range guidance must not
+      // repeat it.
+      expect(output.match(/refine your query/g)?.length).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -101,6 +105,25 @@ describe("vcc_recall pagination and hard-cap truncation signaling", () => {
 
       expect(output).toContain("No matches");
       expect(output).not.toContain("is outside the available range");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("suggests refining the query (once) for an out-of-range page on a NON-truncated result set", async () => {
+    // 12 raw hits, all under the cap (not truncated) — no truncation note to
+    // already say "refine your query", so the out-of-range guidance must
+    // supply it, exactly once. totalPages = ceil(12/5) = 3; page 5 is out of range.
+    const { dir, file, ids } = makeSession(12, (i) => `zebra_query_tag entry number ${i}`);
+    try {
+      const tool = register();
+      const output = await invoke(tool, file, ids, { query: "zebra_query_tag.*entry", page: 5 });
+
+      expect(output).toContain("Page 5 is outside the available range 1-3");
+      expect(output).toContain("12 matches");
+      expect(output).not.toContain("No matches");
+      expect(output).not.toContain("showing"); // not truncated — no truncation note at all
+      expect(output.match(/refine your query/g)?.length).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
