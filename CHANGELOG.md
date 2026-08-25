@@ -2,6 +2,16 @@
 
 All notable changes to `@sting8k/pi-vcc` are documented in this file.
 
+## [0.7.0]
+
+### Features
+
+- **Recall searches bounded tool-call arguments** — commands, write content, edit text, queries, and other string arguments that previously existed in the session but were invisible to search are now indexed under one shared 2,000-character budget per message. Search snippets come from the same bounded text, while `vcc_recall` excludes its own invocation and output to prevent repeat-query feedback loops. File paths, global `#N` indices, lineage scope, `expand`, `mode:"touched"`, and `#N:path` keep their existing semantics.
+
+### Changes
+
+- **Recall trims noisy result tails and bounds pagination** — multi-term natural-language searches drop hits below 20% of the top BM25 score; single-term and regex searches skip that floor. Every search path is capped at 50 results (10 pages), with explicit `showing 50 of N matches` and out-of-range page messages instead of silently understating or misreporting results. On two real-session benchmark runs, the combined policy produced zero new empty searches and zero top-result changes, reduced median result counts from 32→18 and 29.5→20, and bounded p90 at 50.
+
 ## [0.6.1]
 
 ### Fixes
