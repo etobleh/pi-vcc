@@ -2,6 +2,12 @@
 
 All notable changes to `@sting8k/pi-vcc` are documented in this file.
 
+## [0.6.1]
+
+### Fixes
+
+- **Recall: `expand` now works when the original `query` is retained** — callers naturally pass the search query together with selected entry indices, but that combination silently re-ran the clipped search path instead of returning full entries. A non-empty `expand` now takes precedence over search while preserving lineage and `scope` validation.
+
 ## [0.6.0]
 
 ### Features
