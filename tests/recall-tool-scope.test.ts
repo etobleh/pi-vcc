@@ -8,7 +8,7 @@ const makeSession = () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-vcc-recall-scope-"));
   const file = join(dir, "session.jsonl");
   const lines = [
-    JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: "active lineage token" } }),
+    JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: `active lineage token ${"x".repeat(350)} full-content-end` } }),
     JSON.stringify({ type: "message", id: "m2", message: { role: "user", content: "off lineage secret" } }),
   ];
   writeFileSync(file, lines.join("\n") + "\n", "utf8");
@@ -44,6 +44,20 @@ describe("vcc_recall scope", () => {
       const all = await invoke(tool, file, { query: "secret", scope: "all" });
       expect(all).toContain("scope: all");
       expect(all).toContain("off lineage secret");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("expands full entries even when the original query is included", async () => {
+    const { dir, file } = makeSession();
+    try {
+      const tool = register();
+      const output = await invoke(tool, file, { query: "active", expand: [0] });
+
+      expect(output).toContain("#0 [user]");
+      expect(output).toContain("full-content-end");
+      expect(output).not.toContain("matches");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

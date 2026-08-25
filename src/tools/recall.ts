@@ -113,7 +113,7 @@ export const registerRecallTool = (pi: ExtensionAPI) => {
       const expandSet = new Set(params.expand ?? []);
       const hasExpand = expandSet.size > 0;
 
-      if (hasExpand && !params.query) {
+      if (hasExpand) {
         const { rendered: fullMsgs } = loadAllMessages(sessionFile, true, lineageEntryIds);
         const requested = [...expandSet];
         const byIndex = new Map(fullMsgs.map((m) => [m.index, m]));
