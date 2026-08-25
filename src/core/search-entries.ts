@@ -8,6 +8,20 @@ export interface SearchHit extends RenderedEntry {
   /** Number of query terms matched (for ranking) */
   matchCount?: number;
 }
+
+/**
+ * Result of a search, with enough metadata for a caller to report truncation
+ * honestly (see `searchEntriesDetailed`). `searchEntries` stays `SearchHit[]`
+ * for existing call sites that only need the hits themselves.
+ */
+export interface SearchResult {
+  hits: SearchHit[];
+  /** Genuine matches found before the hard cap was applied (after any
+   *  relative-floor noise filtering). May exceed `hits.length`. */
+  totalBeforeCap: number;
+  /** True when the hard cap discarded matches (`totalBeforeCap > hits.length`). */
+  truncated: boolean;
+}
 /** A file touched in one entry — used by mode:touched aggregation. */
 export interface FileTouch {
   index: number;
@@ -342,13 +356,128 @@ export function getTouchedFiles(
   return Array.from(map.values());
 }
 
-export const searchEntries = (
+/**
+ * Relative BM25 noise floor for MULTI-TERM natural-language queries only:
+ * after sorting by score, drop hits scoring below this fraction of the top
+ * score. Relative (not absolute) because BM25 magnitudes vary with corpus
+ * size and document length, so a fixed score threshold would behave
+ * inconsistently across short vs. long sessions.
+ *
+ * Applied only when the query has >=2 DISTINCT effective terms after
+ * stopword filtering and case/duplicate normalization (see the
+ * `effectiveTermCount >= 2` gate below `searchEntriesDetailed` uses before
+ * calling `applyRelativeFloor`). Distinct, not raw count: "auth auth" or
+ * "Auth AUTH" is semantically a single-term query and must bypass the floor
+ * like any other single term — repeating or casing a word doesn't turn it
+ * into the multi-term OR-tail noise this floor targets. The normalization is
+ * gate-only; it doesn't change `terms` or the BM25 scoring itself, which
+ * already matches case-insensitively. For a genuine single term, every hit's
+ * occurrence already satisfies the whole query — its BM25 score differences
+ * reflect term frequency and document length, not multi-term OR-tail noise,
+ * so filtering by it there risks real matches for no corresponding noise
+ * reduction. Evidence below confirmed this rather than assuming it.
+ *
+ * Evidence (scripts/benchmark-recall-quality.ts, run through this exact
+ * production function via its `tuning` override — not a duplicate scoring
+ * implementation). Two independent runs against real session corpora (23
+ * sessions/161 queries and 31 sessions/222 queries; exact counts vary with
+ * whatever real sessions are available locally, so both are reported rather
+ * than treating one as a fixed target):
+ *   - floor=0.20 on multi-term queries: median result count 49→23 (run 1,
+ *     n=69) and 60.5→23.5 (run 2, n=98); p90 142.8→81 and 126.2→75.3.
+ *     Zero-hit count stayed 0 in both runs, top-1 never changed (0/69,
+ *     0/98). Top-5 membership shifted in 5/69 (7%) and 5/98 (5%).
+ *   - floor=0.10 was too weak to "meaningfully" remove the tail (multi-term
+ *     median only 49→39 / 60.5→42); floor=0.25 removed more but roughly
+ *     doubled the multi-term top-5 disruption (8/69, run 1) for little extra
+ *     median gain over 0.20. 0.20 is the least aggressive setting that
+ *     meaningfully thinned the tail.
+ *   - Single-term queries with the floor gated off: every floor candidate
+ *     (0, 0.10, 0.20, 0.25) produced byte-identical results — 0/92 and
+ *     0/124 top-5 changes in both runs, confirming the gate is a true no-op
+ *     rather than an untested assumption. Before this gate existed, applying
+ *     0.20 unconditionally still changed single-term top-5 in a small but
+ *     non-zero fraction of queries (1/140 in this repo's own rerun, 1/124 in
+ *     an independent reviewer rerun) for negligible median movement — real
+ *     false-negative risk for no real noise benefit, which is why the gate
+ *     exists.
+ *
+ * The top-scoring hit always survives by construction, independent of the
+ * evidence above: its own score always satisfies `score >= topScore * floor`
+ * for any floor <= 1, so a non-empty scored[] can never be filtered to zero.
+ */
+const BM25_RELATIVE_FLOOR = 0.2;
+
+/**
+ * Hard cap on total SEARCH results, applied to both the natural-language
+ * (post-floor) and regex result paths so pagination stays bounded regardless
+ * of how noisy or broad a query is.
+ *
+ * Evidence (same bench/corpora as BM25_RELATIVE_FLOOR, floor disabled to
+ * isolate the cap's effect; run 1 = 161 queries, run 2 = 222 queries):
+ * uncapped result counts ranged up to 380 (median 32 / 29.5, p90 119 /
+ * 115.9). cap=50 sits ABOVE the corpus's own median in both runs but BELOW
+ * its p90 — it leaves the typical (median) query unclipped while still
+ * bounding the long tail: only 46/161 (29%) and 66/222 (30%) of queries were
+ * truncated by it, versus 90/161 (56%) and 124/222 (56%) for cap=25, which
+ * would also clip plenty of unremarkable ~30-match queries well under what
+ * "noisy" implies. cap=50 also bounds the worst case (380) down by 87%.
+ * Combined with the floor (production policy: floor=0.20 multi-term-only,
+ * cap=50, vs. no filtering at all): 0 zero-hit regressions and 0 top-1
+ * changes in both runs; top-5 changed in 5/161 (3%) and 5/222 (2%); median
+ * result count 32→18 and 29.5→20; p90 119→50 and 115.9→50.
+ */
+const SEARCH_RESULT_CAP = 50;
+
+/**
+ * Tuning overrides for `searchEntriesDetailed`. Exists only so the offline
+ * bench (scripts/benchmark-recall-quality.ts) and targeted tests can
+ * exercise the real scoring/capping pipeline against candidate constants —
+ * production call sites (`searchEntries`, the recall tool) never pass this
+ * and always get `BM25_RELATIVE_FLOOR`/`SEARCH_RESULT_CAP`.
+ */
+export interface SearchTuning {
+  relativeFloor?: number;
+  cap?: number;
+}
+
+/** Drop scored hits below `floor` of the top score. The top hit's own score
+ *  always passes (score >= score * floor for floor <= 1), so this can never
+ *  turn a non-empty `scored` into an empty result. */
+const applyRelativeFloor = (
+  scored: Array<{ hit: SearchHit; score: number }>,
+  floor: number,
+): Array<{ hit: SearchHit; score: number }> => {
+  if (scored.length === 0) return scored;
+  const topScore = scored[0].score;
+  if (topScore <= 0) return scored;
+  return scored.filter((s) => s.score >= topScore * floor);
+};
+
+/** Bound `hits` to `cap` entries (order preserved), reporting the pre-cap
+ *  count so callers can signal truncation honestly instead of understating
+ *  "total matches". */
+const capHits = (hits: SearchHit[], cap: number): SearchResult => {
+  const totalBeforeCap = hits.length;
+  const capped = totalBeforeCap > cap ? hits.slice(0, cap) : hits;
+  return { hits: capped, totalBeforeCap, truncated: capped.length < totalBeforeCap };
+};
+
+/**
+ * Full search with truncation metadata. `searchEntries` below is a thin
+ * `.hits`-only wrapper kept for existing call sites; use this directly when
+ * a caller (the recall tool) needs to report a capped result set honestly.
+ */
+export const searchEntriesDetailed = (
   entries: RenderedEntry[],
   messages: Message[],
   query?: string,
-): SearchHit[] => {
-  if (!query?.trim()) return entries;
+  tuning?: SearchTuning,
+): SearchResult => {
+  if (!query?.trim()) return { hits: entries, totalBeforeCap: entries.length, truncated: false };
 
+  const relativeFloor = tuning?.relativeFloor ?? BM25_RELATIVE_FLOOR;
+  const cap = tuning?.cap ?? SEARCH_RESULT_CAP;
   const rawQuery = query.trim();
   const checkBudget = startBudget();
 
@@ -360,6 +489,9 @@ export const searchEntries = (
   // verbatim. On real sessions that path returned nothing 47.5% of the time
   // versus 1.1% for term search. Mode detection must never silently lose
   // results, so an empty regex result falls through to term search below.
+  //
+  // No relative-floor filtering here: regex matches are boolean (matched or
+  // not), there's no score to be relative to. Only the hard cap applies.
   if (looksLikeRegex(rawQuery)) {
     const regex = safeRegex(rawQuery);
     const hits: SearchHit[] = [];
@@ -375,7 +507,7 @@ export const searchEntries = (
         hits.push({ ...e, snippet: snip, matchCount: 1 });
       }
     }
-    if (hits.length > 0) return hits;
+    if (hits.length > 0) return capHits(hits, cap);
   }
 
   // Natural language / multi-word query: BM25 scoring
@@ -411,7 +543,23 @@ export const searchEntries = (
     });
   }
 
-  // Sort by BM25 score desc
+  // Sort by BM25 score desc, then drop the noisy long tail relative to the
+  // top score (multi-term queries only — see BM25_RELATIVE_FLOOR), then
+  // apply the hard cap.
   scored.sort((a, b) => b.score - a.score);
-  return scored.map((s) => s.hit);
+  // Gate on DISTINCT normalized terms, not raw term count: "auth auth" or
+  // "Auth AUTH" is semantically a single-term query and must bypass the
+  // floor like any other single term — repeating/casing a word doesn't turn
+  // it into the multi-term OR-tail noise this floor targets. This is a
+  // gate-only normalization; it does not change `terms` itself or the BM25
+  // scoring above, which already matches case-insensitively.
+  const effectiveTermCount = new Set(terms.map((t) => t.toLowerCase())).size;
+  const floored = effectiveTermCount >= 2 ? applyRelativeFloor(scored, relativeFloor) : scored;
+  return capHits(floored.map((s) => s.hit), cap);
 };
+
+export const searchEntries = (
+  entries: RenderedEntry[],
+  messages: Message[],
+  query?: string,
+): SearchHit[] => searchEntriesDetailed(entries, messages, query).hits;
