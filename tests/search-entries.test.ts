@@ -203,3 +203,199 @@ describe("searchEntries mode fallback", () => {
     expect(searchEntries(entries, messages, "kubernetes").length).toBe(0);
   });
 });
+
+describe("searchEntries toolCall arguments", () => {
+  it("finds a bash command that exists only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Running the test suite" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "bash", arguments: { command: "grep -rn UNIQUEMARKER42 src" } }],
+    } as any];
+    const r = searchEntries(e, m, "UNIQUEMARKER42");
+    expect(r).toHaveLength(1);
+    expect(r[0].index).toBe(0);
+    expect(r[0].snippet).toContain("UNIQUEMARKER42");
+    expect(r[0].snippet).toContain("grep");
+  });
+
+  it("finds Write content that exists only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Writing config" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{
+        type: "toolCall", name: "Write",
+        arguments: { path: "config.json", content: '{ "featureFlag": "ZEBRA_STRIPE_MODE" }' },
+      }],
+    } as any];
+    const r = searchEntries(e, m, "ZEBRA_STRIPE_MODE");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("ZEBRA_STRIPE_MODE");
+  });
+
+  it("finds Edit oldText/newText that exist only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Editing file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{
+        type: "toolCall", name: "Edit",
+        arguments: { path: "a.ts", oldText: "const x = 1;", newText: "const QUOKKA_TOKEN = 2;" },
+      }],
+    } as any];
+    const r = searchEntries(e, m, "QUOKKA_TOKEN");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("QUOKKA_TOKEN");
+  });
+
+  it("finds edits[] array oldText/newText that exist only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Editing file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{
+        type: "toolCall", name: "Edit",
+        arguments: { path: "a.ts", edits: [{ oldText: "old", newText: "const NARWHAL_FLAG = true;" }] },
+      }],
+    } as any];
+    const r = searchEntries(e, m, "NARWHAL_FLAG");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("NARWHAL_FLAG");
+  });
+
+  it("does not index a toolCall argument past the aggregate message budget (head-only cap)", () => {
+    // Needle sits ~5000 chars into a single arg field, well past the ~2000-char
+    // per-message toolCall-args budget — it must not be indexed.
+    const giant = "A".repeat(5000) + " NEEDLE_PAST_THE_CAP";
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Writing large file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "Write", arguments: { content: giant } }],
+    } as any];
+    expect(searchEntries(e, m, "NEEDLE_PAST_THE_CAP")).toHaveLength(0);
+  });
+
+  it("aggregates multiple toolCalls under ONE message-level budget, not per-call", () => {
+    // Two toolCalls, each individually well under a 2000-char cap (~1500
+    // chars), so a *per-call* cap would let both through in full. Only an
+    // *aggregate* per-message budget clips the combined text — proving the
+    // fix for the reviewed invariant (N toolCalls must not multiply the bound).
+    const call1 = { command: "EARLY_MARKER " + "A".repeat(1490) }; // ~1503 chars
+    const call2 = { command: "B".repeat(1490) + " LATE_MARKER_XYZ" }; // ~1507 chars
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Two big bash calls" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [
+        { type: "toolCall", name: "bash", arguments: call1 },
+        { type: "toolCall", name: "bash", arguments: call2 },
+      ],
+    } as any];
+    const early = searchEntries(e, m, "EARLY_MARKER");
+    expect(early).toHaveLength(1);
+    expect(early[0].snippet).toContain("EARLY_MARKER");
+    // Combined raw text (call1 + "\n" + call2) is ~3011 chars; LATE_MARKER_XYZ
+    // sits at the tail of call2, past the shared 2000-char budget.
+    expect(searchEntries(e, m, "LATE_MARKER_XYZ")).toHaveLength(0);
+  });
+
+  it("keeps a giant toolCall argument's indexed/snippet contribution bounded", () => {
+    // Needle sits near the start (within the cap) — it's found, and the
+    // snippet built from that indexed text stays bounded even though the
+    // underlying argument is 20k+ chars.
+    const giant = "NEEDLE_NEAR_START " + "B".repeat(20_000);
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Writing large file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "Write", arguments: { content: giant } }],
+    } as any];
+    const r = searchEntries(e, m, "NEEDLE_NEAR_START");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("NEEDLE_NEAR_START");
+    // Bounded: the snippet must never approach the raw 20k-char argument size.
+    expect(r[0].snippet!.length).toBeLessThan(2500);
+  });
+
+  it("excludes the recall tool's own arguments from search (no self-hit)", () => {
+    // A vcc_recall invocation is persisted as an ordinary assistant toolCall.
+    // Its own { query } argument must not echo the search term back as a
+    // guaranteed self-hit — that would pollute every search's result count.
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Searching" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "vcc_recall", arguments: { query: "SELF_HIT_MARKER" } }],
+    } as any];
+    expect(searchEntries(e, m, "SELF_HIT_MARKER")).toHaveLength(0);
+  });
+
+  it("excludes only the recall tool call, not a sibling toolCall in the same message", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Searching then running" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [
+        { type: "toolCall", name: "vcc_recall", arguments: { query: "SELF_HIT_MARKER" } },
+        { type: "toolCall", name: "bash", arguments: { command: "echo SIBLING_MARKER" } },
+      ],
+    } as any];
+    expect(searchEntries(e, m, "SELF_HIT_MARKER")).toHaveLength(0);
+    const r = searchEntries(e, m, "SIBLING_MARKER");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("SIBLING_MARKER");
+  });
+
+  it("excludes the recall tool call case-insensitively", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Searching" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "VCC_Recall", arguments: { query: "SELF_HIT_MARKER_2" } }],
+    } as any];
+    expect(searchEntries(e, m, "SELF_HIT_MARKER_2")).toHaveLength(0);
+  });
+
+  it("does not regress plain text search when toolCall args are also present", () => {
+    const r = searchEntries(entries, messages, "login");
+    expect(r).toHaveLength(1);
+    expect(r[0].index).toBe(0);
+  });
+});
+
+describe("searchEntries recall toolResult exclusion", () => {
+  // A vcc_recall call is [toolCall args (assistant)] -> [toolResult text].
+  // The toolCall-args side is covered above; these cover the toolResult side
+  // — its "N matches for \"<query>\">" text must not self-match a repeat query.
+
+  it("excludes the recall tool's own toolResult from search (no growth on repeat query)", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: '[vcc_recall] 1 matches for "MARKER"' }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "vcc_recall",
+      content: [{ type: "text", text: '1 matches for "MARKER" (page 1/1)' }],
+    } as any];
+    expect(searchEntries(e, m, "MARKER")).toHaveLength(0);
+  });
+
+  it("keeps an ordinary (non-recall) toolResult searchable", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: "[Read] file contents" }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "Read",
+      content: [{ type: "text", text: "export const MARKER_VALUE = 1;" }],
+    } as any];
+    const r = searchEntries(e, m, "MARKER_VALUE");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("MARKER_VALUE");
+  });
+
+  it("does not affect browse/no-query results — entries are returned unchanged", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: '[vcc_recall] 1 matches for "MARKER"' }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "vcc_recall",
+      content: [{ type: "text", text: '1 matches for "MARKER"' }],
+    } as any];
+    expect(searchEntries(e, m)).toEqual(e);
+    expect(searchEntries(e, m, "")).toEqual(e);
+  });
+
+  it("excludes the recall toolResult case-insensitively", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: '[VCC_Recall] 1 matches for "MARKER2"' }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "VCC_Recall",
+      content: [{ type: "text", text: '1 matches for "MARKER2"' }],
+    } as any];
+    expect(searchEntries(e, m, "MARKER2")).toHaveLength(0);
+  });
+});

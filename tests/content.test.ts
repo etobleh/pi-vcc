@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { textParts, textOf, clip, firstLine } from "../src/core/content";
+import { textParts, textOf, clip, firstLine, extractToolCallArgsText } from "../src/core/content";
 
 describe("textParts", () => {
   it("returns [] for undefined content", () => {
@@ -27,5 +27,33 @@ describe("textParts", () => {
 describe("textOf", () => {
   it("returns empty string for undefined content", () => {
     expect(textOf(undefined as any)).toBe("");
+  });
+});
+
+describe("extractToolCallArgsText", () => {
+  it("extracts top-level string scalars (e.g. bash command)", () => {
+    expect(extractToolCallArgsText({ command: "grep -rn foo src" })).toBe("grep -rn foo src");
+  });
+
+  it("extracts strings from array-of-object fields (e.g. edits[])", () => {
+    const args = { path: "a.ts", edits: [{ oldText: "old", newText: "new" }] };
+    const text = extractToolCallArgsText(args);
+    expect(text).toContain("a.ts");
+    expect(text).toContain("old");
+    expect(text).toContain("new");
+  });
+
+  it("ignores non-string scalars (numbers/booleans)", () => {
+    expect(extractToolCallArgsText({ limit: 50, verbose: true })).toBe("");
+  });
+
+  it("returns '' for missing/invalid args", () => {
+    expect(extractToolCallArgsText(undefined as any)).toBe("");
+    expect(extractToolCallArgsText(null as any)).toBe("");
+  });
+
+  it("does not clip on its own — extraction is unbounded; the caller (search-entries.ts) owns the budget", () => {
+    const text = extractToolCallArgsText({ content: "x".repeat(10_000) });
+    expect(text.length).toBe(10_000);
   });
 });

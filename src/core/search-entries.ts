@@ -1,6 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import type { RenderedEntry } from "./render-entries";
-import { textOf, isContentBearing, extractToolCallText } from "./content";
+import { textOf, isContentBearing, extractToolCallText, extractToolCallArgsText, clip } from "./content";
 
 export interface SearchHit extends RenderedEntry {
   /** Context snippet around the first matched term (only when query provided) */
@@ -222,12 +222,71 @@ const lineSnippet = (text: string, regex: RegExp, contextLines = 2): string | un
   return parts.join("\n");
 };
 
-/** Build full searchable text for a message. */
+/**
+ * Aggregate character budget for ALL toolCall arguments appended to one
+ * message's searchable text — a single shared budget across every toolCall
+ * in the message, not per call, so N toolCalls can't multiply the bound and
+ * make one message's contribution to the BM25 doc corpus unbounded.
+ *
+ * Head-only cap: content past this budget is not indexed via toolCall
+ * arguments at all. This is an honest tradeoff, not a proxy for full
+ * coverage — a Write/Edit tool result commonly only acknowledges success
+ * (e.g. "wrote 400 lines"), so a fact buried past the cap in a giant
+ * argument is not guaranteed to be searchable elsewhere either.
+ */
+const TOOL_ARGS_BUDGET = 2000;
+
+/**
+ * Tool name of the recall tool itself (src/tools/recall.ts). A search
+ * operation must not match its own query or its own prior output: the
+ * vcc_recall invocation is persisted as an ordinary assistant toolCall (its
+ * `{ query }` argument, excluded below in `toolCallArgsText`) followed by an
+ * ordinary toolResult message (its `N matches for "<query>"` text, excluded
+ * in `fullText`) — without both exclusions a repeated query keeps matching
+ * its own prior invocation/output and the hit count grows on every search.
+ * This is a targeted introspection invariant for one named tool, not a
+ * general allowlist/blocklist over tool names or tool results.
+ */
+const RECALL_TOOL_NAME = "vcc_recall";
+
+/** Text of every toolCall's arguments in a message's content, for search —
+ *  bounded once, in aggregate, by TOOL_ARGS_BUDGET. Excludes the recall
+ *  tool's own arguments (see RECALL_TOOL_NAME). */
+const toolCallArgsText = (content: Message["content"]): string => {
+  if (!content || typeof content === "string") return "";
+  const raw = content
+    .filter((part) => part.type === "toolCall")
+    .filter((part) => part.name?.toLowerCase() !== RECALL_TOOL_NAME)
+    .map((part) => extractToolCallArgsText(part.arguments))
+    .filter(Boolean)
+    .join("\n");
+  return clip(raw, TOOL_ARGS_BUDGET);
+};
+
+/**
+ * Build full searchable text for a message: text parts plus toolCall
+ * arguments (bash command, Write/Edit content, etc.) so a match that only
+ * exists in a tool call's arguments is still findable and its snippet is
+ * derived from the same text.
+ *
+ * The recall tool's own toolResult is excluded (searchable text ""): it
+ * echoes back `N matches for "<query>"` from the *previous* recall call, so
+ * indexing it would make a repeated query self-match and grow with every
+ * search. This only affects search indexing — browse/no-query returns
+ * entries before fullText runs (see `searchEntries`), and #N expand reads
+ * the message/entry directly, not through this function, so the toolResult
+ * is still fully visible there.
+ */
 const fullText = (msg: Message): string => {
   if ((msg as any).role === "bashExecution") {
     return `${(msg as any).command ?? ""} ${(msg as any).output ?? ""}`;
   }
-  return textOf(msg.content);
+  if (msg.role === "toolResult" && msg.toolName?.toLowerCase() === RECALL_TOOL_NAME) {
+    return "";
+  }
+  const text = textOf(msg.content);
+  const argsText = toolCallArgsText(msg.content);
+  return argsText ? `${text}\n${argsText}` : text;
 };
 
 /**
