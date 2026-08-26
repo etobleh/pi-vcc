@@ -114,6 +114,36 @@ export const extractToolCallText = (args: Record<string, unknown>): string => {
   return text;
 };
 
+/**
+ * Extract every scalar string argument from a tool call for search indexing
+ * — command, query, content, oldText/newText, etc. Generic value walk (no
+ * tool-name allowlist): top-level strings plus strings one level into
+ * array-of-object fields (e.g. `edits`). Unbounded by design — a single
+ * toolCall's raw argument text — so a message with several toolCalls doesn't
+ * silently multiply an internal cap. The caller (search-entries.ts) applies
+ * one shared budget across all toolCalls in a message.
+ */
+export const extractToolCallArgsText = (args: Record<string, unknown>): string => {
+  if (!args || typeof args !== "object") return "";
+  const parts: string[] = [];
+  for (const value of Object.values(args)) {
+    if (typeof value === "string") {
+      parts.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string") {
+          parts.push(item);
+        } else if (item && typeof item === "object") {
+          for (const v of Object.values(item)) {
+            if (typeof v === "string") parts.push(v);
+          }
+        }
+      }
+    }
+  }
+  return parts.join("\n");
+};
+
 /** Extract a snippet of ~`radius` chars around the first match of `term` in `text`. */
 export const snippet = (text: string, term: string, radius = 60): string | null => {
   const idx = text.toLowerCase().indexOf(term.toLowerCase());

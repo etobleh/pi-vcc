@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadAllMessages } from "../core/load-messages";
-import { searchEntries } from "../core/search-entries";
+import { searchEntriesDetailed } from "../core/search-entries";
 import { formatRecallOutput } from "../core/format-recall";
 import { getActiveLineageEntryIds } from "../core/lineage";
 import { parseRecallScope } from "../core/recall-scope";
@@ -46,17 +46,48 @@ export const registerVccRecallCommand = (pi: ExtensionAPI) => {
       }
 
       const { rendered, rawMessages } = loadAllMessages(sessionFile, false, lineageEntryIds);
-      const allResults = searchEntries(rendered, rawMessages, query);
+      const { hits, totalBeforeCap, truncated } = searchEntriesDetailed(rendered, rawMessages, query);
+      // Single source of truth for page count: hits.length, the same array
+      // that's actually paginated below (already floor-filtered and capped).
+      const totalPages = Math.ceil(hits.length / PAGE_SIZE);
+      const scopeSuffix = parsed.scope === "all" ? " (scope: all)" : "";
+      const scopeArg = parsed.scope === "all" ? " scope:all" : "";
+      // The hard cap can discard genuine matches; hits.length alone would
+      // then understate the real total. Say so explicitly instead of
+      // reporting the capped count as if it were everything. Neutral
+      // wording ("showing", not "showing top"): regex-path hits are
+      // boolean/chronological matches with no relevance score, so "top"
+      // would falsely imply a ranking that only the BM25 path has.
+      const truncationNote = truncated
+        ? ` — showing ${hits.length} of ${totalBeforeCap} matches, refine your query for more precise results`
+        : "";
+
+      // The hard cap creates a fixed reachable page range (1..totalPages).
+      // A page beyond it isn't "no matches" — matches exist, the page just
+      // isn't reachable. Say so explicitly instead of falling through to
+      // formatRecallOutput's zero-hit message, which would be false here.
+      if (hits.length > 0 && page > totalPages) {
+        // truncationNote already ends in "...refine your query" when the hard
+        // cap kicked in — don't repeat that suggestion here, just say which
+        // pages exist. Only add "or refine your query" when there's no
+        // truncation note to have said it already.
+        const guidance = truncated
+          ? `Use /pi-vcc-recall ${query}${scopeArg} page:N with N between 1 and ${totalPages}.`
+          : `Use /pi-vcc-recall ${query}${scopeArg} page:N with N between 1 and ${totalPages}, or refine your query.`;
+        const text =
+          `Page ${page} is outside the available range 1-${totalPages} ` +
+          `(${hits.length} matches${scopeSuffix}${truncationNote}). ${guidance}`;
+        pi.sendMessage({ customType: "vcc-recall", content: text, display: true }, { triggerTurn: true });
+        return;
+      }
 
       const start = (page - 1) * PAGE_SIZE;
-      const pageResults = allResults.slice(start, start + PAGE_SIZE);
-      const totalPages = Math.ceil(allResults.length / PAGE_SIZE);
-      const scopeSuffix = parsed.scope === "all" ? " (scope: all)" : "";
+      const pageResults = hits.slice(start, start + PAGE_SIZE);
       const header = totalPages > 1
-        ? `Page ${page}/${totalPages} (${allResults.length} total matches${scopeSuffix})`
-        : `${allResults.length} matches${scopeSuffix}`;
+        ? `Page ${page}/${totalPages} (${hits.length} total matches${scopeSuffix}${truncationNote})`
+        : `${hits.length} matches${scopeSuffix}${truncationNote}`;
       const footer = page < totalPages
-        ? `\n--- /pi-vcc-recall ${query}${parsed.scope === "all" ? " scope:all" : ""} page:${page + 1} ---`
+        ? `\n--- /pi-vcc-recall ${query}${scopeArg} page:${page + 1} ---`
         : "";
       const output = formatRecallOutput(pageResults, query, header) + footer;
       pi.sendMessage({ customType: "vcc-recall", content: output, display: true }, { triggerTurn: true });

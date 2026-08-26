@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { searchEntries } from "../src/core/search-entries";
+import { searchEntries, searchEntriesDetailed } from "../src/core/search-entries";
 import type { RenderedEntry } from "../src/core/render-entries";
 import type { Message } from "@earendil-works/pi-ai";
 
@@ -201,5 +201,322 @@ describe("searchEntries mode fallback", () => {
 
   it("returns nothing when neither mode matches", () => {
     expect(searchEntries(entries, messages, "kubernetes").length).toBe(0);
+  });
+});
+
+describe("searchEntries toolCall arguments", () => {
+  it("finds a bash command that exists only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Running the test suite" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "bash", arguments: { command: "grep -rn UNIQUEMARKER42 src" } }],
+    } as any];
+    const r = searchEntries(e, m, "UNIQUEMARKER42");
+    expect(r).toHaveLength(1);
+    expect(r[0].index).toBe(0);
+    expect(r[0].snippet).toContain("UNIQUEMARKER42");
+    expect(r[0].snippet).toContain("grep");
+  });
+
+  it("finds Write content that exists only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Writing config" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{
+        type: "toolCall", name: "Write",
+        arguments: { path: "config.json", content: '{ "featureFlag": "ZEBRA_STRIPE_MODE" }' },
+      }],
+    } as any];
+    const r = searchEntries(e, m, "ZEBRA_STRIPE_MODE");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("ZEBRA_STRIPE_MODE");
+  });
+
+  it("finds Edit oldText/newText that exist only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Editing file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{
+        type: "toolCall", name: "Edit",
+        arguments: { path: "a.ts", oldText: "const x = 1;", newText: "const QUOKKA_TOKEN = 2;" },
+      }],
+    } as any];
+    const r = searchEntries(e, m, "QUOKKA_TOKEN");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("QUOKKA_TOKEN");
+  });
+
+  it("finds edits[] array oldText/newText that exist only in toolCall arguments", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Editing file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{
+        type: "toolCall", name: "Edit",
+        arguments: { path: "a.ts", edits: [{ oldText: "old", newText: "const NARWHAL_FLAG = true;" }] },
+      }],
+    } as any];
+    const r = searchEntries(e, m, "NARWHAL_FLAG");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("NARWHAL_FLAG");
+  });
+
+  it("does not index a toolCall argument past the aggregate message budget (head-only cap)", () => {
+    // Needle sits ~5000 chars into a single arg field, well past the ~2000-char
+    // per-message toolCall-args budget — it must not be indexed.
+    const giant = "A".repeat(5000) + " NEEDLE_PAST_THE_CAP";
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Writing large file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "Write", arguments: { content: giant } }],
+    } as any];
+    expect(searchEntries(e, m, "NEEDLE_PAST_THE_CAP")).toHaveLength(0);
+  });
+
+  it("aggregates multiple toolCalls under ONE message-level budget, not per-call", () => {
+    // Two toolCalls, each individually well under a 2000-char cap (~1500
+    // chars), so a *per-call* cap would let both through in full. Only an
+    // *aggregate* per-message budget clips the combined text — proving the
+    // fix for the reviewed invariant (N toolCalls must not multiply the bound).
+    const call1 = { command: "EARLY_MARKER " + "A".repeat(1490) }; // ~1503 chars
+    const call2 = { command: "B".repeat(1490) + " LATE_MARKER_XYZ" }; // ~1507 chars
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Two big bash calls" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [
+        { type: "toolCall", name: "bash", arguments: call1 },
+        { type: "toolCall", name: "bash", arguments: call2 },
+      ],
+    } as any];
+    const early = searchEntries(e, m, "EARLY_MARKER");
+    expect(early).toHaveLength(1);
+    expect(early[0].snippet).toContain("EARLY_MARKER");
+    // Combined raw text (call1 + "\n" + call2) is ~3011 chars; LATE_MARKER_XYZ
+    // sits at the tail of call2, past the shared 2000-char budget.
+    expect(searchEntries(e, m, "LATE_MARKER_XYZ")).toHaveLength(0);
+  });
+
+  it("keeps a giant toolCall argument's indexed/snippet contribution bounded", () => {
+    // Needle sits near the start (within the cap) — it's found, and the
+    // snippet built from that indexed text stays bounded even though the
+    // underlying argument is 20k+ chars.
+    const giant = "NEEDLE_NEAR_START " + "B".repeat(20_000);
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Writing large file" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "Write", arguments: { content: giant } }],
+    } as any];
+    const r = searchEntries(e, m, "NEEDLE_NEAR_START");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("NEEDLE_NEAR_START");
+    // Bounded: the snippet must never approach the raw 20k-char argument size.
+    expect(r[0].snippet!.length).toBeLessThan(2500);
+  });
+
+  it("excludes the recall tool's own arguments from search (no self-hit)", () => {
+    // A vcc_recall invocation is persisted as an ordinary assistant toolCall.
+    // Its own { query } argument must not echo the search term back as a
+    // guaranteed self-hit — that would pollute every search's result count.
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Searching" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "vcc_recall", arguments: { query: "SELF_HIT_MARKER" } }],
+    } as any];
+    expect(searchEntries(e, m, "SELF_HIT_MARKER")).toHaveLength(0);
+  });
+
+  it("excludes only the recall tool call, not a sibling toolCall in the same message", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Searching then running" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [
+        { type: "toolCall", name: "vcc_recall", arguments: { query: "SELF_HIT_MARKER" } },
+        { type: "toolCall", name: "bash", arguments: { command: "echo SIBLING_MARKER" } },
+      ],
+    } as any];
+    expect(searchEntries(e, m, "SELF_HIT_MARKER")).toHaveLength(0);
+    const r = searchEntries(e, m, "SIBLING_MARKER");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("SIBLING_MARKER");
+  });
+
+  it("excludes the recall tool call case-insensitively", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "assistant", summary: "Searching" }];
+    const m: Message[] = [{
+      role: "assistant",
+      content: [{ type: "toolCall", name: "VCC_Recall", arguments: { query: "SELF_HIT_MARKER_2" } }],
+    } as any];
+    expect(searchEntries(e, m, "SELF_HIT_MARKER_2")).toHaveLength(0);
+  });
+
+  it("does not regress plain text search when toolCall args are also present", () => {
+    const r = searchEntries(entries, messages, "login");
+    expect(r).toHaveLength(1);
+    expect(r[0].index).toBe(0);
+  });
+});
+
+describe("searchEntries recall toolResult exclusion", () => {
+  // A vcc_recall call is [toolCall args (assistant)] -> [toolResult text].
+  // The toolCall-args side is covered above; these cover the toolResult side
+  // — its "N matches for \"<query>\">" text must not self-match a repeat query.
+
+  it("excludes the recall tool's own toolResult from search (no growth on repeat query)", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: '[vcc_recall] 1 matches for "MARKER"' }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "vcc_recall",
+      content: [{ type: "text", text: '1 matches for "MARKER" (page 1/1)' }],
+    } as any];
+    expect(searchEntries(e, m, "MARKER")).toHaveLength(0);
+  });
+
+  it("keeps an ordinary (non-recall) toolResult searchable", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: "[Read] file contents" }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "Read",
+      content: [{ type: "text", text: "export const MARKER_VALUE = 1;" }],
+    } as any];
+    const r = searchEntries(e, m, "MARKER_VALUE");
+    expect(r).toHaveLength(1);
+    expect(r[0].snippet).toContain("MARKER_VALUE");
+  });
+
+  it("does not affect browse/no-query results — entries are returned unchanged", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: '[vcc_recall] 1 matches for "MARKER"' }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "vcc_recall",
+      content: [{ type: "text", text: '1 matches for "MARKER"' }],
+    } as any];
+    expect(searchEntries(e, m)).toEqual(e);
+    expect(searchEntries(e, m, "")).toEqual(e);
+  });
+
+  it("excludes the recall toolResult case-insensitively", () => {
+    const e: RenderedEntry[] = [{ index: 0, role: "tool_result", summary: '[VCC_Recall] 1 matches for "MARKER2"' }];
+    const m: Message[] = [{
+      role: "toolResult", toolName: "VCC_Recall",
+      content: [{ type: "text", text: '1 matches for "MARKER2"' }],
+    } as any];
+    expect(searchEntries(e, m, "MARKER2")).toHaveLength(0);
+  });
+});
+
+describe("searchEntriesDetailed relative noise floor", () => {
+  // Query matches all 4 terms multiple times in entry 0, all 4 terms once
+  // in entry 1, and only 1 of 4 terms once each in entries 2-4 — a clear
+  // score cliff between {0,1} and {2,3,4} under multi-term BM25 OR scoring.
+  const graded = [
+    "alpha beta gamma delta alpha beta gamma delta alpha beta gamma delta discussion of the redis cache design",
+    "alpha beta gamma delta talked about this pairing once in a design review",
+    "alpha mentioned once in passing during a long unrelated conversation about something else entirely",
+    "beta appears here only one time in a sentence about nothing important at all today",
+    "gamma shows up once too in this otherwise unrelated paragraph of text about weather",
+  ];
+  const gradedEntries: RenderedEntry[] = graded.map((t, i) => ({ index: i, role: "user", summary: t }));
+  const gradedMessages: Message[] = graded.map((t) => ({ role: "user", content: t } as any));
+  const query = "alpha beta gamma delta";
+
+  it("drops a clearly low-score tail but preserves the surviving hits' order (default floor)", () => {
+    // Baseline (floor disabled): every entry matches at least one term.
+    const baseline = searchEntriesDetailed(gradedEntries, gradedMessages, query, { relativeFloor: 0, cap: 1e9 });
+    expect(baseline.hits.map((h) => h.index)).toEqual([0, 1, 2, 4, 3]);
+
+    // Default floor (no tuning override — the real production constant):
+    // the low-score tail (2, 3, 4) is dropped, top order (0, 1) preserved.
+    const r = searchEntriesDetailed(gradedEntries, gradedMessages, query);
+    expect(r.hits.map((h) => h.index)).toEqual([0, 1]);
+    expect(r.totalBeforeCap).toBe(2);
+    expect(r.truncated).toBe(false); // floor-filtered, not cap-truncated
+  });
+
+  it("never zeroes a non-empty result — a sole, low-score hit still survives", () => {
+    const texts = ["nothing relevant here at all", "the redis cache invalidation kept failing in staging"];
+    const e: RenderedEntry[] = texts.map((t, i) => ({ index: i, role: "user", summary: t }));
+    const m: Message[] = texts.map((t) => ({ role: "user", content: t } as any));
+    const r = searchEntriesDetailed(e, m, "redis cache invalidation");
+    expect(r.hits).toHaveLength(1);
+    expect(r.hits[0].index).toBe(1);
+  });
+
+  it("never applies the relative floor to single-term queries — structural, not fixture-specific", () => {
+    // Effective term count (after stopword filtering) gates the floor: <2
+    // terms skips it entirely, regardless of how aggressive the floor is.
+    // Proven with an aggressive floor override (0.9) and a corpus shaped so
+    // the low-scoring hit WOULD be cut if the floor applied — it survives
+    // only because the single-term gate bypasses filtering altogether.
+    const singleTermTexts = [
+      "auth ".repeat(20) + "flow rewritten", // 20x occurrences — high score
+      "one mention of auth here in an otherwise unrelated changelog entry", // 1x — low score
+    ];
+    const e: RenderedEntry[] = singleTermTexts.map((t, i) => ({ index: i, role: "user", summary: t }));
+    const m: Message[] = singleTermTexts.map((t) => ({ role: "user", content: t } as any));
+    const r = searchEntriesDetailed(e, m, "auth", { relativeFloor: 0.9, cap: 1e9 });
+    expect(r.hits.map((h) => h.index)).toEqual([0, 1]); // both survive: gate bypassed floor entirely
+
+    // Control: the SAME floor override on an equivalent MULTI-term corpus
+    // does filter the low-score hit — proving the override mechanism itself
+    // works, and that single-term survival above is the gate, not a fluke.
+    const multiTermTexts = [
+      "alpha beta gamma delta ".repeat(3) + "design review",
+      "alpha mentioned once in an unrelated paragraph",
+    ];
+    const e2: RenderedEntry[] = multiTermTexts.map((t, i) => ({ index: i, role: "user", summary: t }));
+    const m2: Message[] = multiTermTexts.map((t) => ({ role: "user", content: t } as any));
+    const r2 = searchEntriesDetailed(e2, m2, "alpha beta gamma delta", { relativeFloor: 0.9, cap: 1e9 });
+    expect(r2.hits.map((h) => h.index)).toEqual([0]); // low-score hit filtered
+  });
+
+  it("gates on DISTINCT normalized terms — duplicate/case-duplicate words stay single-term", () => {
+    // "auth auth" / "Auth AUTH" is semantically ONE term repeated/recased,
+    // not a multi-term query. Same aggressive floor (0.9) and corpus shape
+    // as above: the low-score hit must still survive every variant.
+    const texts = [
+      "auth ".repeat(20) + "flow rewritten",
+      "one mention of auth here in an otherwise unrelated changelog entry",
+    ];
+    const e: RenderedEntry[] = texts.map((t, i) => ({ index: i, role: "user", summary: t }));
+    const m: Message[] = texts.map((t) => ({ role: "user", content: t } as any));
+
+    for (const q of ["auth auth", "Auth AUTH", "auth Auth auth"]) {
+      const r = searchEntriesDetailed(e, m, q, { relativeFloor: 0.9, cap: 1e9 });
+      expect(r.hits.map((h) => h.index).sort()).toEqual([0, 1]);
+    }
+  });
+});
+
+describe("searchEntriesDetailed hard result cap", () => {
+  const size = 60;
+  const bm25Entries: RenderedEntry[] = Array.from({ length: size }, (_, i) => ({
+    index: i, role: "user", summary: `zebra_query_tag entry number ${i}`,
+  }));
+  const bm25Messages: Message[] = bm25Entries.map((e) => ({ role: "user", content: e.summary } as any));
+
+  it("bounds the BM25/natural-language path to SEARCH_RESULT_CAP (50)", () => {
+    // Disable the floor so the cap's effect is isolated — all 60 entries
+    // are equally strong single-term matches, so none would be floor-filtered.
+    const r = searchEntriesDetailed(bm25Entries, bm25Messages, "zebra_query_tag", { relativeFloor: 0 });
+    expect(r.totalBeforeCap).toBe(60);
+    expect(r.hits).toHaveLength(50);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("bounds the regex path to SEARCH_RESULT_CAP (50), with default tuning (no override)", () => {
+    const regexEntries: RenderedEntry[] = Array.from({ length: size }, (_, i) => ({
+      index: i, role: "user", summary: `zebra_query_tag entry number ${i}`,
+    }));
+    const regexMessages: Message[] = regexEntries.map((e) => ({ role: "user", content: e.summary } as any));
+    // "." makes this a regex-mode query (looksLikeRegex), no BM25/floor involved.
+    const r = searchEntriesDetailed(regexEntries, regexMessages, "zebra_query_tag.*entry");
+    expect(r.totalBeforeCap).toBe(60);
+    expect(r.hits).toHaveLength(50);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("does not truncate when raw hits are under the cap", () => {
+    const small = bm25Entries.slice(0, 10);
+    const smallMsgs = bm25Messages.slice(0, 10);
+    const r = searchEntriesDetailed(small, smallMsgs, "zebra_query_tag");
+    expect(r.hits).toHaveLength(10);
+    expect(r.totalBeforeCap).toBe(10);
+    expect(r.truncated).toBe(false);
   });
 });
