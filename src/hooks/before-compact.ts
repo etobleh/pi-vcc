@@ -9,6 +9,7 @@ import { calibrateCharsPerToken, estimateMessageContentChars, estimateMessageCon
 import { buildGlobalIndexMap } from "../core/lineage";
 import { extractFiles } from "../extract/files";
 import { normalize } from "../core/normalize";
+import { countPiVccCompactionsFromSession, ordinalSuffix } from "../core/compaction-count";
 import type { PiVccCompactionDetails } from "../details";
 import type { CompactionReason, FileOps } from "../types";
 
@@ -85,16 +86,19 @@ const formatTokens = (n: number): string => {
   return String(n);
 };
 
-export const formatCompactionStats = (stats: CompactionStats): string => {
+export const formatCompactionStats = (stats: CompactionStats, ordinal?: number): string => {
+  const compactionLabel = ordinal && ordinal > 0
+    ? ` (${ordinal}${ordinalSuffix(ordinal)} compaction)`
+    : "";
   if (stats.budgetCut) {
     const reason = stats.budgetCut === "no_anchor" ? "no user anchor" : "oversized tail";
-    return `pi-vcc: kept ~${formatTokens(stats.keptTokensEst)} tok tail (mid-turn cut, ${reason}), summarized ${stats.summarized}.`;
+    return `pi-vcc: kept ~${formatTokens(stats.keptTokensEst)} tok tail (mid-turn cut, ${reason}), summarized ${stats.summarized}.${compactionLabel}`;
   }
   const notes: string[] = [`summarized ${stats.summarized}`];
   if (stats.smartKeepAdjusted) {
     notes.push("smart-keep");
   }
-  return `pi-vcc: kept ${stats.keptUserTurns}/${stats.totalUserTurns} turns, ~${formatTokens(stats.keptTokensEst)} tok (${notes.join(", ")}).`;
+  return `pi-vcc: kept ${stats.keptUserTurns}/${stats.totalUserTurns} turns, ~${formatTokens(stats.keptTokensEst)} tok (${notes.join(", ")}).${compactionLabel}`;
 };
 
 const readCompactionEventContext = (event: unknown): { reason?: CompactionReason; willRetry: boolean } => {
@@ -105,11 +109,12 @@ const readCompactionEventContext = (event: unknown): { reason?: CompactionReason
   return { reason, willRetry: raw.willRetry === true };
 };
 
-export const scheduleCompactionStatsNotify = (ctx: any, stats: CompactionStats) => {
+export const scheduleCompactionStatsNotify = (ctx: any, stats: CompactionStats, ordinal?: number) => {
+  const count = ordinal ?? countPiVccCompactionsFromSession(ctx?.sessionManager);
   setTimeout(() => {
     try {
       ctx?.ui?.notify?.(
-        formatCompactionStats(stats),
+        formatCompactionStats(stats, count),
         "info",
       );
     } catch {}

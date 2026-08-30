@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getLastCompactionStats, scheduleCompactionStatsNotify } from "../hooks/before-compact";
+import { countPiVccCompactionsFromSession, ordinalSuffix } from "../core/compaction-count";
 import { buildPiVccCustomInstructions, parseKeepAndPrompt } from "../core/compact-args";
 
 export const registerPiVccCommand = (pi: ExtensionAPI) => {
@@ -11,10 +12,12 @@ export const registerPiVccCommand = (pi: ExtensionAPI) => {
         customInstructions: buildPiVccCustomInstructions(keepUserTurns),
         onComplete: () => {
           const stats = getLastCompactionStats();
+          const count = countPiVccCompactionsFromSession(ctx.sessionManager);
           if (stats) {
-            scheduleCompactionStatsNotify(ctx, stats);
+            scheduleCompactionStatsNotify(ctx, stats, count);
           } else {
-            ctx.ui.notify("Compacted with pi-vcc", "info");
+            const label = count > 0 ? ` (${count}${ordinalSuffix(count)} compaction)` : "";
+            ctx.ui.notify(`Compacted with pi-vcc${label}`, "info");
           }
           if (followUpPrompt) {
             try {
