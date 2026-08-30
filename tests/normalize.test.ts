@@ -28,9 +28,12 @@ describe("normalize", () => {
     expect(normalize([msg])).toEqual([{ kind: "assistant", text: "plain text", sourceIndex: 0 }]);
   });
 
-  it("skips assistant thinking blocks", () => {
-    const blocks = normalize([assistantWithThinking("result", "hmm")]);
-    expect(blocks).toEqual([{ kind: "assistant", text: "result", sourceIndex: 0 }]);
+  it("normalizes assistant thinking blocks", () => {
+    const blocks = normalize([assistantWithThinking("result", "hmm reasoning")]);
+    expect(blocks).toEqual([
+      { kind: "thinking", text: "hmm reasoning", redacted: false, sourceIndex: 0 },
+      { kind: "assistant", text: "result", sourceIndex: 0 },
+    ]);
   });
 
   it("normalizes tool call", () => {

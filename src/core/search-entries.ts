@@ -1,6 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import type { RenderedEntry } from "./render-entries";
-import { textOf, isContentBearing, extractToolCallText, extractToolCallArgsText, clip } from "./content";
+import { textOf, thinkingOf, isContentBearing, extractToolCallText, extractToolCallArgsText, clip } from "./content";
 
 export interface SearchHit extends RenderedEntry {
   /** Context snippet around the first matched term (only when query provided) */
@@ -299,8 +299,10 @@ const fullText = (msg: Message): string => {
     return "";
   }
   const text = textOf(msg.content);
+  const thinking = thinkingOf(msg.content);
   const argsText = toolCallArgsText(msg.content);
-  return argsText ? `${text}\n${argsText}` : text;
+  const parts = [thinking, text, argsText].filter(Boolean);
+  return parts.join("\n");
 };
 
 /**

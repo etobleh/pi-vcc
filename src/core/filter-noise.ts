@@ -29,6 +29,7 @@ export const filterNoise = (
 
   const out: NormalizedBlock[] = [];
   for (const b of blocks) {
+    if (b.kind === "thinking") continue;
     if (b.kind === "tool_call" && b.name && noiseTools.has(b.name.toLowerCase())) continue;
     if (b.kind === "tool_result" && b.name && noiseTools.has(b.name.toLowerCase())) continue;
     if (b.kind === "custom" && b.customType && noiseCustomTypes.has(b.customType.toLowerCase())) continue;

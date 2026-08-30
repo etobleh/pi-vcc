@@ -155,6 +155,24 @@ describe("searchEntries regex safety", () => {
     return { entries, messages };
   };
 
+  it("finds keywords that exist only in assistant thinking blocks", () => {
+    const entries: any[] = [
+      { index: 0, role: "assistant", summary: "Here is the code", files: [] },
+    ];
+    const messages: any[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "We chose postgres over sqlite for concurrency reasons" },
+          { type: "text", text: "Here is the code" },
+        ],
+      },
+    ];
+    const hits = searchEntries(entries, messages, "postgres concurrency");
+    expect(hits.length).toBe(1);
+    expect(hits[0].index).toBe(0);
+  });
+
   it("treats nested-quantifier patterns as literals instead of hanging", () => {
     const { entries, messages } = corpus(20);
     const t0 = Date.now();

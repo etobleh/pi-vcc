@@ -66,6 +66,13 @@ const normalizeOne = (msg: any, msgIndex?: number): NormalizedBlock[] => {
           args: part.arguments,
           sourceIndex: msgIndex,
         });
+      } else if (part.type === "thinking") {
+        blocks.push({
+          kind: "thinking",
+          text: sanitize(part.thinking),
+          redacted: Boolean(part.redacted),
+          sourceIndex: msgIndex,
+        });
       }
     }
     return blocks;

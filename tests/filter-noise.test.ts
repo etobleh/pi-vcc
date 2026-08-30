@@ -27,6 +27,16 @@ describe("filterNoise", () => {
     expect(result[1]).toEqual({ kind: "user", text: "Fix the bug" });
   });
 
+  it("removes thinking blocks from summary blocks", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "thinking", text: "reasoning about approach" },
+      { kind: "assistant", text: "Here is the plan" },
+    ];
+    const result = filterNoise(blocks);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ kind: "assistant", text: "Here is the plan" });
+  });
+
   it("removes empty user blocks", () => {
     const blocks: NormalizedBlock[] = [
       { kind: "user", text: "   \n  " },
