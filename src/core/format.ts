@@ -62,6 +62,7 @@ export const formatSummary = (data: SectionData, options: FormatSummaryOptions =
     section("Files And Changes", data.filesAndChanges),
     section("Commits", data.commits),
     section("Outstanding Context", data.outstandingContext),
+    section("Earlier Turns", data.turnSummaries ?? []),
   ].filter(Boolean);
 
   const parts: string[] = [];

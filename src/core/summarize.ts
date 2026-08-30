@@ -6,6 +6,8 @@ import { buildSections } from "./build-sections";
 import { formatSummary, capBrief, BRIEF_MAX_LINES, RECALL_NOTE, wrapLongLines } from "./format";
 import { selectRankedBriefBlocks, type BriefRankingOptions } from "./rank";
 
+import { refineBreadcrumbKey } from "./causal-keys";
+
 export interface CompileInput {
   messages: any[];
   previousSummary?: string;
@@ -26,6 +28,7 @@ const HEADER_NAMES = [
   "Files And Changes",
   "Commits",
   "Outstanding Context",
+  "Earlier Turns",
 ];
 
 const SEPARATOR = "\n\n---\n\n";
@@ -62,27 +65,98 @@ const briefOf = (text: string): string => {
   return text.slice(idx + SEPARATOR.length).trim();
 };
 
+/**
+ * Extract searchable keywords from a section line for breadcrumb trails.
+ */
+const extractBreadcrumb = (line: string): string => {
+  const text = line.replace(/^\s*-\s*/, "").trim();
+  if (!text) return "";
+
+  if (text.startsWith("...recall:")) return text.slice("...recall:".length).trim();
+
+  if (text.includes("\u2192")) {
+    const parts = text.split("\u2192").map((p) => p.trim());
+
+    const fileMatch = text.match(/(?:edited |read |wrote |created |deleted )?([^\s.]+\.\w{1,12})/);
+    const file = fileMatch ? fileMatch[1] : null;
+
+    const toolActionRe = /^(?:read|edited|wrote|created|deleted|ran)\s?/i;
+    const toolActionIdx = parts.findIndex((p) => toolActionRe.test(p) || /\+\d+ more/.test(p));
+
+    const causalEnd = toolActionIdx >= 0 ? toolActionIdx : parts.length;
+    const causalParts = parts.slice(1, causalEnd);
+
+    const causePart = causalParts.length >= 2 ? causalParts[0] : null;
+    const resolutionPart = causalParts.length >= 1 ? causalParts[causalParts.length - 1] : null;
+
+    if (resolutionPart) {
+      const resKey = refineBreadcrumbKey(resolutionPart);
+      if (file && resKey) return `${file}|${resKey}`;
+      if (resKey) return resKey;
+    }
+
+    if (causePart) {
+      const causeKey = refineBreadcrumbKey(causePart);
+      if (file && causeKey) return `${file}|${causeKey}`;
+      if (causeKey) return causeKey;
+    }
+
+    if (file) return file;
+  }
+
+  const fileMatch1 = text.match(/(?:edited |read |wrote |created |deleted )?(\S+\.\w{1,12})/);
+  if (fileMatch1) return fileMatch1[1];
+  const beforeArrow = text.split("\u2192")[0].trim();
+  const words = beforeArrow.split(/\s+/).filter((w) => w.length > 2).slice(0, 3);
+  if (words.length > 0) return words.join(" ");
+  const first = text.split(/\s+/).find((w) => w.length > 2);
+  return first ?? "";
+};
+
 /** Merge a header section */
 const mergeHeaderSection = (header: string, prev: string, fresh: string): string => {
   // Outstanding Context is volatile -- always use fresh only
   if (header === "Outstanding Context") return fresh;
-  if (!prev) return fresh;
-  if (!fresh) return prev;
+  if (!prev && !fresh) return "";
 
   // Files And Changes: merge by category (Modified/Created/Read), dedup paths
   if (header === "Files And Changes") {
     return mergeFileLines(prev, fresh);
   }
 
-  // Session Goal, User Preferences: line-level dedup, cap
+  // Session Goal, User Preferences, Commits, Earlier Turns: line-level dedup, cap
   const isClean = (l: string) => l.startsWith("- ") && !l.includes("<skill") && !l.includes("</skill");
+  const isRecallBreadcrumb = (l: string) => l.startsWith("- ...recall:");
   const prevLines = prev.split("\n").filter(isClean);
   const freshLines = fresh.split("\n").filter(isClean);
-  const combined = [...new Set([...prevLines, ...freshLines])];
-  const CAP = header === "Session Goal" ? 8 : header === "Commits" ? 8 : 15;
-  const capped = combined.length > CAP ? combined.slice(-CAP) : combined;
-  if (capped.length === 0) return "";
-  return `[${header}]\n${capped.join("\n")}`;
+  const prevBreadcrumbs = prev.split("\n").filter(isRecallBreadcrumb);
+  const freshBreadcrumbs = fresh.split("\n").filter(isRecallBreadcrumb);
+  const allBreadcrumbs = [...new Set([...prevBreadcrumbs, ...freshBreadcrumbs])];
+  const contentLines = [
+    ...new Set([
+      ...prevLines.filter((l) => !isRecallBreadcrumb(l)),
+      ...freshLines.filter((l) => !isRecallBreadcrumb(l)),
+    ]),
+  ];
+  const CAP = header === "Session Goal" ? 8 : header === "Commits" ? 8 : header === "Earlier Turns" ? 15 : 15;
+
+  if (contentLines.length > CAP) {
+    const kept = contentLines.slice(-CAP);
+    const dropped = contentLines.slice(0, contentLines.length - CAP);
+    const crumbs = dropped.map(extractBreadcrumb).filter(Boolean);
+    const headerLine = `[${header}]`;
+    const allCrumbs = crumbs.length > 0 ? [...allBreadcrumbs, `- ...recall: ${crumbs.join(", ")}`] : allBreadcrumbs;
+    if (allCrumbs.length > 0) {
+      return `${headerLine}\n${allCrumbs.join("\n")}\n${kept.join("\n")}`;
+    }
+    return `${headerLine}\n${kept.join("\n")}`;
+  }
+
+  if (contentLines.length === 0 && allBreadcrumbs.length === 0) return "";
+  const parts: string[] = [];
+  if (allBreadcrumbs.length > 0) parts.push(...allBreadcrumbs);
+  if (contentLines.length > 0) parts.push(...contentLines);
+  return `[${header}]\n${parts.join("\n")}`;
 };
 
 /** Merge Files And Changes by category, dedup paths across compactions */
@@ -91,17 +165,22 @@ const mergeFileLines = (prev: string, fresh: string): string => {
   const merged: Record<string, Set<string>> = {};
   for (const cat of categories) merged[cat] = new Set();
 
-  // Parse "- Modified: a, b, c (+N more)" lines from both prev and fresh
   for (const text of [prev, fresh]) {
+    if (!text) continue;
     for (const line of text.split("\n")) {
       for (const cat of categories) {
         const prefix = `- ${cat}: `;
         if (!line.startsWith(prefix)) continue;
         let rest = line.slice(prefix.length);
+        // Strip symbol annotations like " (fn1, fn2)" from each path
+        rest = rest.replace(/\s*\([^)]*\)/g, "");
         // Strip "(+N more)" suffix
         rest = rest.replace(/\s*\(\+\d+ more\)\s*$/, "");
+        // Strip breadcrumb marker so paths after it are parsed
+        rest = rest.replace(/,\s*\+recall:\s*/, ", ");
         for (const p of rest.split(",")) {
           const trimmed = p.trim();
+          if (trimmed.startsWith("+recall:")) continue;
           if (trimmed) merged[cat].add(trimmed);
         }
       }
@@ -114,7 +193,9 @@ const mergeFileLines = (prev: string, fresh: string): string => {
   const cap = (set: Set<string>, limit: number) => {
     const arr = [...set];
     if (arr.length <= limit) return arr.join(", ");
-    return arr.slice(0, limit).join(", ") + ` (+${arr.length - limit} more)`;
+    const kept = arr.slice(0, limit);
+    const omitted = arr.slice(limit);
+    return kept.join(", ") + `, +recall: ${omitted.join(", ")}`;
   };
 
   const lines: string[] = [];

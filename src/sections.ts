@@ -4,5 +4,7 @@ export interface SectionData {
   filesAndChanges: string[];
   commits: string[];
   userPreferences: string[];
+  /** Per-turn one-liner summaries for Earlier Turns */
+  turnSummaries?: string[];
   briefTranscript: string;
 }

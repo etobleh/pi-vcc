@@ -6,7 +6,7 @@ import { extractGoals } from "../extract/goals";
 import { extractFiles, trimFileActivityCommonPrefix } from "../extract/files";
 import { extractPreferences, dedupPreferencesAgainstGoals } from "../extract/preferences";
 import { extractCommits, formatCommits } from "../extract/commits";
-import { buildBriefSections, stringifyBrief } from "./brief";
+import { buildBriefSections, identifyTurns, stringifyBrief } from "./brief";
 
 export interface BuildSectionsInput {
   blocks: NormalizedBlock[];
@@ -231,6 +231,7 @@ export const buildSections = (input: BuildSectionsInput): SectionData => {
     filesAndChanges: formatFileActivity(blocks, input.fileOps),
     commits: formatCommits(extractCommits(blocks)),
     userPreferences,
+    turnSummaries: identifyTurns(blocks).map((t) => t.summary),
     briefTranscript: stringifyBrief(briefSections),
   };
 };

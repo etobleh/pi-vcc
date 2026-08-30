@@ -429,6 +429,249 @@ export const stringifyBrief = (sections: BriefLine[]): string => {
   return out.join("\n");
 };
 
+const shortenPath = (p: string): string => {
+  const parts = p.split(/[/\\]/);
+  return parts.length > 2 ? parts.slice(-2).join("/") : p;
+};
+
+// ── causal extraction ──
+
+const CAUSE_MARKERS: readonly string[] = [
+  "the issue is",
+  "the problem is",
+  "the problem was",
+  "the bug is",
+  "the bug was",
+  "the cause is",
+  "root cause:",
+  "root cause is",
+  "the reason is",
+  "fails because",
+  "fails when",
+  "fails due to",
+  "crashes because",
+  "crashes when",
+  "crashes due to",
+  "breaks because",
+  "breaks when",
+  "breaks due to",
+  "because ",
+  "since ",
+  "due to ",
+  "missing ",
+  "lacking ",
+  "lack of ",
+  "absence of ",
+  "can't ",
+  "cannot ",
+  "not properly ",
+  "not correctly ",
+  "not validating ",
+  "not returning ",
+  "not handling ",
+  "not releasing ",
+  "not checking ",
+  "wrong ",
+  "incorrect ",
+  "stale ",
+  "outdated ",
+  "unhandled ",
+  "uncaught ",
+];
+
+const RESOLUTION_MARKERS: readonly string[] = [
+  "fix this by",
+  "fix it by",
+  "resolve this by",
+  "resolve it by",
+  "resolve by",
+  "handle this by",
+  "handle by",
+  "address this by",
+  "address by",
+  "by adding",
+  "by creating",
+  "by implementing",
+  "by introducing",
+  "by applying",
+  "by inserting",
+  "by using",
+  "by swapping",
+  "by migrating",
+  "by isolating",
+  "by splitting",
+  "by extracting",
+  "by replacing",
+  "by refactoring",
+  "by wrapping",
+  "by moving",
+  "by removing",
+  "added ",
+  "created ",
+  "implemented ",
+  "introduced ",
+  "applied ",
+  "inserted ",
+  "changed to",
+  "updated to",
+  "switched to",
+  "migrated to",
+  "replaced with",
+  "replaced by",
+  "refactored to",
+  "extracted into",
+  "set up ",
+  "configured ",
+  "enabled ",
+  "swapped ",
+  "isolated ",
+  "splitting ",
+  "split ",
+  "wrapped ",
+  "guarded ",
+  "moved ",
+  "removed ",
+];
+
+const FRAGMENT_MAX = 60;
+const CAUSAL_BREADCRUMB_MAX = 40;
+const SENTINEL_CHARS = new Set([",", ".", ";", "!", "?", "\n"]);
+
+const extractFragment = (
+  text: string,
+  markers: readonly string[],
+): string | null => {
+  const lower = text.toLowerCase();
+  for (const marker of markers) {
+    const idx = lower.indexOf(marker);
+    if (idx < 0) continue;
+    const start = idx + marker.length;
+    if (start >= text.length) continue;
+
+    let end = start;
+    while (end < text.length && end - start < FRAGMENT_MAX) {
+      if (SENTINEL_CHARS.has(text[end])) break;
+      end++;
+    }
+    const fragment = text.slice(start, end).trim();
+    if (fragment.length < 4) continue;
+    return fragment;
+  }
+  return null;
+};
+
+export const extractCausalChain = (
+  text: string,
+): { cause: string | null; resolution: string | null } => {
+  let cause = extractFragment(text, CAUSE_MARKERS);
+  let resolution = extractFragment(text, RESOLUTION_MARKERS);
+
+  if (!cause || !resolution) {
+    const sentences = text.split(/[.!?]/).filter((s) => s.trim().length > 3);
+    for (const sentence of sentences) {
+      if (!cause) cause = extractFragment(sentence, CAUSE_MARKERS);
+      if (!resolution) resolution = extractFragment(sentence, RESOLUTION_MARKERS);
+      if (cause && resolution) break;
+    }
+  }
+
+  return {
+    cause: cause ? clip(cause, CAUSAL_BREADCRUMB_MAX) : null,
+    resolution: resolution ? clip(resolution, CAUSAL_BREADCRUMB_MAX) : null,
+  };
+};
+
+const synthesizeTurnSummary = (
+  userText: string | null,
+  toolActions: string[],
+  causalChain: { cause: string | null; resolution: string | null } = { cause: null, resolution: null },
+): string => {
+  const parts: string[] = [];
+
+  if (userText && userText.length > 3) {
+    parts.push(clip(userText, 50));
+  }
+
+  const hasCausal = causalChain.cause || causalChain.resolution;
+  if (hasCausal) {
+    if (causalChain.cause) parts.push(causalChain.cause);
+    if (causalChain.resolution) parts.push(causalChain.resolution);
+  }
+
+  const uniqueActions = [...new Set(toolActions)].slice(0, 5);
+  if (uniqueActions.length > 0) {
+    const edits = uniqueActions.filter((a) => a.startsWith("edited"));
+    const others = uniqueActions.filter((a) => !a.startsWith("edited"));
+    if (edits.length > 0 && others.length <= 2) {
+      parts.push(uniqueActions.join(", "));
+    } else if (edits.length > 0) {
+      parts.push(edits.join(", "));
+      if (others.length > 0) parts.push(`+${others.length} more`);
+    } else {
+      parts.push(uniqueActions.join(", "));
+    }
+  }
+
+  return parts.join(" \u2192 ") || "(no actions)";
+};
+
+export interface TurnInfo {
+  summary: string;
+}
+
+export const identifyTurns = (blocks: NormalizedBlock[]): TurnInfo[] => {
+  const turns: TurnInfo[] = [];
+  let currentUserText: string | null = null;
+  const toolActions: string[] = [];
+  const assistantTexts: string[] = [];
+
+  const flush = () => {
+    if (currentUserText === null && toolActions.length === 0) return;
+
+    const combinedAssistant = assistantTexts.join(" ");
+    const causalChain = extractCausalChain(combinedAssistant);
+
+    turns.push({
+      summary: synthesizeTurnSummary(currentUserText, toolActions, causalChain),
+    });
+    currentUserText = null;
+    toolActions.length = 0;
+    assistantTexts.length = 0;
+  };
+
+  for (const b of blocks) {
+    if (b.kind === "user" || b.kind === "bash") {
+      flush();
+      currentUserText = b.kind === "user"
+        ? truncateTokens(collapseSkillText(b.text), 12)
+        : truncateTokens(b.command, 12);
+    } else if (b.kind === "assistant") {
+      if (b.text) assistantTexts.push(b.text);
+    } else if (b.kind === "tool_call") {
+      const path = extractPath(b.args);
+      const name = b.name.toLowerCase();
+      if (path) {
+        const short = shortenPath(path);
+        if (name === "edit" || name === "write" || name === "multiedit") {
+          toolActions.push(`edited ${short}`);
+        } else if (name === "read") {
+          toolActions.push(`read ${short}`);
+        } else {
+          toolActions.push(`${name} ${short}`);
+        }
+      } else if (name === "bash") {
+        const cmd = (b.args.command ?? "") as string;
+        const first = cmd.split("\n")[0]?.slice(0, 30) ?? "cmd";
+        toolActions.push(`ran ${first}`);
+      } else {
+        toolActions.push(name);
+      }
+    }
+  }
+  flush();
+  return turns;
+};
+
 /** Convenience: build sections from blocks and stringify to text */
 export const compileBrief = (blocks: NormalizedBlock[]): string =>
   stringifyBrief(buildBriefSections(blocks));
