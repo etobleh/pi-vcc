@@ -106,13 +106,21 @@ describe("buildSections", () => {
 
   it("captures test failures in bash output as [WARN] [tests]", () => {
     const blocks: NormalizedBlock[] = [
-      { kind: "bash", command: "bun test", output: "2 failed\nFAIL auth.test.ts", exitCode: 1 },
+      { kind: "bash", command: "bun test", output: "bun test v1.4.0\n2 failed\nFAIL auth.test.ts", exitCode: 1 },
     ];
     const r = buildSections({ blocks });
     expect(r.outstandingContext.length).toBe(1);
     expect(r.outstandingContext[0]).toContain("[WARN]");
     expect(r.outstandingContext[0]).toContain("[tests]");
     expect(r.outstandingContext[0]).toContain("2 failed");
+    expect(r.outstandingContext[0]).not.toContain("bun test v1.4.0");
+  });
+
+  it("does not classify a successful bun test summary as a failure", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "bash", command: "bun test", output: "bun test v1.4.0\n 338 pass\n 0 fail", exitCode: 0 },
+    ];
+    expect(buildSections({ blocks }).outstandingContext).toEqual([]);
   });
 
   it("respects the 8KB scan limit for errors in large bash output", () => {

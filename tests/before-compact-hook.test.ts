@@ -3,6 +3,7 @@ import { existsSync, unlinkSync, writeFileSync, readFileSync, mkdtempSync, rmSyn
 import { tmpdir } from "os";
 import { join } from "path";
 import { registerBeforeCompactHook, PI_VCC_COMPACT_INSTRUCTION, getLastCompactionStats, formatCompactionStats, buildOwnCut, applyTailBudget } from "../src/hooks/before-compact";
+import { checkAndTrigger, resetProactiveState } from "../src/hooks/proactive-threshold";
 
 let tmpDir: string;
 let CONFIG_PATH: string;
@@ -244,6 +245,43 @@ describe("registerBeforeCompactHook: compact-all path", () => {
     expect(result.compaction.firstKeptEntryId).toBe("m3");
     expect(result.compaction.details).toMatchObject({ reason: "threshold", willRetry: false });
     expect(getLastCompactionStats()).toMatchObject({ reason: "threshold", willRetry: false });
+  });
+
+  test("proactive compact treats pi's manual reason as threshold and auto-continues", async () => {
+    setConfig({
+      debug: false,
+      overrideDefaultCompaction: true,
+      continueAfterThresholdCompact: true,
+      globalThreshold: { compactPercent: 75 },
+    });
+    const { pi, invokeBefore, invokeCompact, customMessages } = createMockPi();
+    registerBeforeCompactHook(pi);
+
+    const entries = [
+      msg("m1", "user"),
+      msg("m2", "assistant"),
+      msg("m3", "user"),
+      { id: "m4", type: "message", message: { role: "assistant", content: "in progress" } },
+    ];
+
+    try {
+      checkAndTrigger({
+        model: { id: "test-model", contextWindow: 100_000 },
+        getContextUsage: () => ({ tokens: 80_000 }),
+        compact: () => {},
+      }, "auto");
+
+      const result = invokeBefore(makeEvent(entries, undefined, { reason: "manual", willRetry: false }));
+      expect(result.compaction.details.reason).toBe("threshold");
+      expect(getLastCompactionStats()?.reason).toBe("threshold");
+
+      await invokeCompact({ type: "session_compact", fromExtension: true, reason: "manual", willRetry: false });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(customMessages).toHaveLength(1);
+      expect(customMessages[0].message.customType).toBe("pi-vcc-auto-continue");
+    } finally {
+      resetProactiveState();
+    }
   });
 
   test("threshold compact does not auto-continue by default", async () => {

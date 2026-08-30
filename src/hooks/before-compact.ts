@@ -514,6 +514,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
   pi.on("session_before_compact", (event, ctx) => {
     lastStats = null;
     lastCompactWasPiVcc = false;
+    lastCompactWasProactive = false;
     lastCompactionInterrupted = false;
     pendingFollowUpPrompt = null;
 
@@ -694,9 +695,12 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       (sum: number, e: any) => sum + estimateMessageContentChars(e.message?.content),
       0,
     );
+    // Pi reports extension-initiated ctx.compact() calls as "manual". While
+    // the proactive flag is active, record the actual threshold cause.
+    const proactive = isProactiveTriggerActive();
     const effectiveReason: CompactionReason | undefined =
-      reason ?? (isProactiveTriggerActive() ? "threshold" : undefined);
-    lastCompactWasProactive = isProactiveTriggerActive();
+      proactive && (reason === undefined || reason === "manual") ? "threshold" : reason;
+    lastCompactWasProactive = proactive;
 
     lastStats = {
       summarized: messagesToSummarize.length,
@@ -753,7 +757,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
     dbg(config, {
       usedOwnCut: true,
       budgetCut: ownCut.budgetCut,
-      compaction: { reason, willRetry },
+      compaction: { reason: effectiveReason, willRetry },
       messagesToSummarize: messagesToSummarize.length,
       messagesPreviewHead: messagesToSummarize.slice(0, 3).map((m: any) => ({ role: m.message?.role, preview: previewContent(m.message?.content) })),
       messagesPreviewTail: messagesToSummarize.slice(-3).map((m: any) => ({ role: m.message?.role, preview: previewContent(m.message?.content) })),
@@ -794,6 +798,10 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
   // /pi-vcc path uses its own onComplete callback in the command handler.
   pi.on("session_compact", async (event, ctx) => {
     const { reason, willRetry } = readCompactionEventContext(event);
+    // This handler is registered before the proactive hook, which clears its
+    // active flag. Consume our captured value here before that happens.
+    const wasProactive = lastCompactWasProactive;
+    lastCompactWasProactive = false;
     if (!event.fromExtension) return;
     const followUpPrompt = pendingFollowUpPrompt;
     pendingFollowUpPrompt = null;
@@ -801,7 +809,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
     if (willRetry) return;
     const stats = lastStats;
     if (!stats) return;
-    const shouldContinueAfterAutoCompact = (reason === "threshold" || reason === "overflow")
+    const shouldContinueAfterAutoCompact = (wasProactive || reason === "threshold" || reason === "overflow")
       && loadSettings().continueAfterThresholdCompact
       && lastCompactionInterrupted;
     scheduleCompactionStatsNotify(ctx, stats);

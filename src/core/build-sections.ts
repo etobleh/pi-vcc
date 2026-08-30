@@ -23,8 +23,17 @@ const BLOCKER_RE =
 // TypeScript compiler error pattern
 const TSC_ERROR_RE = /error TS\d+:.+/;
 
-// Test failure indicators
-const TEST_FAIL_RE = /(?:FAIL|✗|✘|×)\s|(\d+)\s+(?:failed|failure|failing)/i;
+// Test failure indicators. Keep the uppercase FAIL marker case-sensitive so
+// successful summaries such as "0 fail" do not match.
+const TEST_FAIL_RE = /FAIL\s|[✗✘×]\s|(?:[1-9]\d*)\s+(?:failed|failure|failing)\b/;
+const TEST_FAIL_COUNT_RE = /(?:[1-9]\d*)\s+(?:failed|failure|failing)\b/i;
+
+const testFailureLine = (text: string): string | null => {
+  for (const line of text.split("\n")) {
+    if (TEST_FAIL_RE.test(line) || TEST_FAIL_COUNT_RE.test(line)) return line.trim();
+  }
+  return null;
+};
 
 // Empty grep/search result indicators
 const EMPTY_RESULT_RE = /^(?:No matches? found\.?|No files? matched\.?|0 results?|No results?\.?)$/i;
@@ -98,8 +107,9 @@ const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
         }
         continue;
       }
-      if (outputHead && TEST_FAIL_RE.test(outputHead)) {
-        push(`[tests] ${firstLine(b.output, 150)}`);
+      const failedTestLine = b.exitCode !== 0 ? testFailureLine(outputHead) : null;
+      if (failedTestLine) {
+        push(`[tests] ${clip(failedTestLine, 150)}`);
         continue;
       }
       if (b.exitCode !== undefined && b.exitCode !== 0) {
@@ -150,8 +160,9 @@ const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
         continue;
       }
       // Check for test failures
-      if (TEST_FAIL_RE.test(textHead)) {
-        push(`[tests] ${firstLine(b.text, 150)}`);
+      const failedTestLine = testFailureLine(textHead);
+      if (failedTestLine) {
+        push(`[tests] ${clip(failedTestLine, 150)}`);
         continue;
       }
       // Generic error fallback

@@ -7,9 +7,9 @@
  * so counting entries at that point includes the just-completed compaction —
  * meaning the count doubles as the 1-based ordinal of the latest one.
  *
- * `getEntries()` returns the full append-only session (all lineages), which
- * matches the `compaction:N` indexing scheme used by vcc_recall — so the
- * ordinal shown in the notification lines up with `scope:"compaction:N"`.
+ * `getEntries()` returns the full append-only session (all lineages), so the
+ * ordinal is a session-wide count. It is informational; vcc_recall scopes are
+ * `lineage` and `all`.
  */
 
 export const ordinalSuffix = (n: number): string => {
