@@ -9,6 +9,7 @@ import { calibrateCharsPerToken, estimateMessageContentChars, estimateMessageCon
 import { buildGlobalIndexMap } from "../core/lineage";
 import { extractFiles } from "../extract/files";
 import { normalize } from "../core/normalize";
+import { isProactiveTriggerActive } from "./proactive-threshold";
 import { countPiVccCompactionsFromSession, ordinalSuffix } from "../core/compaction-count";
 import type { PiVccCompactionDetails } from "../details";
 import type { CompactionReason, FileOps } from "../types";
@@ -39,6 +40,7 @@ export const OVERSIZED_TAIL_FACTOR = 2.5;
 
 let lastStats: CompactionStats | null = null;
 let lastCompactWasPiVcc = false;
+let lastCompactWasProactive = false;
 let lastCompactionInterrupted = false;
 let pendingFollowUpPrompt: string | null = null;
 let pendingAutoContinueTimer: ReturnType<typeof setTimeout> | null = null;
@@ -692,6 +694,10 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       (sum: number, e: any) => sum + estimateMessageContentChars(e.message?.content),
       0,
     );
+    const effectiveReason: CompactionReason | undefined =
+      reason ?? (isProactiveTriggerActive() ? "threshold" : undefined);
+    lastCompactWasProactive = isProactiveTriggerActive();
+
     lastStats = {
       summarized: messagesToSummarize.length,
       kept: keptEntries.length,
@@ -704,7 +710,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       smartKeepAdjusted: smartKeep.smartAdjusted,
       smartFromKeep: smartKeep.fromKeep,
       budgetCut: ownCut.ok ? ownCut.budgetCut : undefined,
-      reason,
+      reason: effectiveReason,
       willRetry,
     };
 
@@ -768,7 +774,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       previousSummaryUsed: Boolean(preparation.previousSummary),
       readFiles: fileOps.readFiles,
       modifiedFiles: fileOps.modifiedFiles,
-      reason,
+      reason: effectiveReason,
       willRetry,
     };
 

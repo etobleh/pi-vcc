@@ -116,4 +116,27 @@ describe("proactive threshold triggering", () => {
     try { require("fs").unlinkSync(tmpConfig); } catch {}
     delete process.env.PI_VCC_CONFIG_PATH;
   });
+
+  it("resets proactive trigger state on resetProactiveState", () => {
+    const ctx = {
+      model: { id: "test-model", contextWindow: 100_000 },
+      getContextUsage: () => ({ tokens: 85_000 }),
+      compact: () => {},
+      ui: { notify: () => {} },
+    };
+    const tmpConfig = `/tmp/test-pi-vcc-${Date.now()}.json`;
+    require("fs").writeFileSync(tmpConfig, JSON.stringify({
+      globalThreshold: { compactPercent: 75 },
+    }));
+    process.env.PI_VCC_CONFIG_PATH = tmpConfig;
+
+    checkAndTrigger(ctx, "auto");
+    expect(isProactiveTriggerActive()).toBe(true);
+
+    resetProactiveState();
+    expect(isProactiveTriggerActive()).toBe(false);
+
+    try { require("fs").unlinkSync(tmpConfig); } catch {}
+    delete process.env.PI_VCC_CONFIG_PATH;
+  });
 });
