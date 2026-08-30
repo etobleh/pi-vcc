@@ -59,6 +59,28 @@ describe("formatSummary", () => {
     expect(r).toContain("\n\n");
   });
 
+  it("orders stable sections before volatile sections", () => {
+    const data = {
+      ...empty,
+      sessionGoal: ["goal"],
+      userPreferences: ["use bun"],
+      filesAndChanges: ["Modified: a.ts"],
+      commits: ["c123456 initial"],
+      outstandingContext: ["still failing"],
+    };
+    const r = formatSummary(data);
+    const goalIdx = r.indexOf("[Session Goal]");
+    const prefIdx = r.indexOf("[User Preferences]");
+    const filesIdx = r.indexOf("[Files And Changes]");
+    const commitIdx = r.indexOf("[Commits]");
+    const outIdx = r.indexOf("[Outstanding Context]");
+
+    expect(goalIdx).toBeLessThan(prefIdx);
+    expect(prefIdx).toBeLessThan(filesIdx);
+    expect(filesIdx).toBeLessThan(commitIdx);
+    expect(commitIdx).toBeLessThan(outIdx);
+  });
+
   it("wraps long lines so compaction TUI rendering stays bounded", () => {
     const data = {
       ...empty,

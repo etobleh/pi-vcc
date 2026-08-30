@@ -19,9 +19,24 @@ export interface RankedCompileInput extends CompileInput {
   ranking?: BriefRankingOptions;
 }
 
-const HEADER_NAMES = ["Session Goal", "Files And Changes", "Commits", "Outstanding Context", "User Preferences"];
+// Cache-friendly order: stable sections first, volatile sections last
+const HEADER_NAMES = [
+  "Session Goal",
+  "User Preferences",
+  "Files And Changes",
+  "Commits",
+  "Outstanding Context",
+];
 
 const SEPARATOR = "\n\n---\n\n";
+
+/** Preamble prepended to every compaction summary. */
+export const HANDOFF_PREAMBLE =
+  "This summary captures work done before the most recent messages in this session. " +
+  "Read it to pick up context — this is work already in progress. " +
+  "Do not recap what was done, do not ask what to do next. " +
+  "Continue directly where you left off. " +
+  "Use `vcc_recall` to search for prior work, decisions, and context from before this summary.";
 
 /** Extract a named section from summary text */
 const sectionOf = (text: string, header: string): string => {
@@ -188,14 +203,14 @@ const compileWithBriefBlocks = (input: CompileInput, options: CompileWithBriefBl
   const briefBlocks = options.briefBlocksFor?.(blocks);
   const data = buildSections({ blocks, briefBlocks, fileOps: input.fileOps });
   const fresh = formatSummary(data, { capBriefTranscript: options.capFreshBrief ?? true });
-  // Strip any legacy RECALL_NOTE baked into prev summary (pre-fix format)
-  // so merge doesn't re-stack it inside the brief.
+  // Strip preamble/legacy RECALL_NOTE baked into prev summary
+  // so merge doesn't re-stack it.
   const prev = input.previousSummary
-    ? stripRecallNote(input.previousSummary)
+    ? stripPreambleAndRecallNote(input.previousSummary)
     : undefined;
   const merged = prev ? mergePrevious(prev, fresh, { preserveFreshBrief: options.preserveFreshBriefOnMerge }) : fresh;
   if (!merged) return "";
-  return wrapLongLines(merged + SEPARATOR + RECALL_NOTE);
+  return wrapLongLines(HANDOFF_PREAMBLE + "\n\n" + merged);
 };
 
 export const compile = (input: CompileInput): string =>
@@ -211,10 +226,26 @@ export const compileRanked = (input: RankedCompileInput): string =>
     preserveFreshBriefOnMerge: true,
   });
 
-const stripRecallNote = (text: string): string => {
-  // Remove trailing RECALL_NOTE (and any separators surrounding it) if present.
-  // Handles both current format (---\n\nNOTE) and bare trailing NOTE.
-  const idx = text.lastIndexOf(RECALL_NOTE);
-  if (idx < 0) return text;
-  return text.slice(0, idx).replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
+export const stripPreambleAndRecallNote = (text: string): string => {
+  let result = text;
+
+  // 1. Leading preamble: "This summary captures work done before..."
+  if (result.startsWith("This summary captures work done before")) {
+    const headerStart = result.indexOf("[");
+    if (headerStart > 0) {
+      result = result.slice(headerStart).trim();
+    } else {
+      const doubleNL = result.indexOf("\n\n");
+      if (doubleNL > 0) result = result.slice(doubleNL + 2).trim();
+    }
+  }
+
+  // 2. Trailing legacy RECALL_NOTE
+  const legacyRecall = "Use `vcc_recall` to search for prior work, decisions, and context from before this summary.";
+  const legacyIdx = result.lastIndexOf(legacyRecall);
+  if (legacyIdx > 0) {
+    result = result.slice(0, legacyIdx).replace(/\s*(?:\n\n---\n\n)?\s*$/, "").trimEnd();
+  }
+
+  return result;
 };

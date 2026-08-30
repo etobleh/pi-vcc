@@ -78,6 +78,25 @@ describe("compile", () => {
     expect(r).toContain("latest");
   });
 
+  it("prepends handoff preamble exactly once across sequential merges", () => {
+    const firstCompaction = compile({
+      messages: [userMsg("First goal")],
+    });
+    expect(firstCompaction).toContain("This summary captures work done before");
+    expect(firstCompaction.indexOf("This summary captures work done before")).toBe(0);
+
+    // Second compaction using output of first as previousSummary
+    const secondCompaction = compile({
+      previousSummary: firstCompaction,
+      messages: [userMsg("Second goal")],
+    });
+    const matches = secondCompaction.match(/This summary captures work done before/g);
+    expect(matches?.length).toBe(1);
+    expect(secondCompaction.indexOf("This summary captures work done before")).toBe(0);
+    expect(secondCompaction).toContain("- First goal");
+    expect(secondCompaction).toContain("- Second goal");
+  });
+
   it("wraps final output including recall note", () => {
     const r = compile({
       messages: [userMsg("check final summary wrapping")],

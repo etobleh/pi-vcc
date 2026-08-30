@@ -58,10 +58,10 @@ export const formatSummary = (data: SectionData, options: FormatSummaryOptions =
   const capBriefTranscript = options.capBriefTranscript ?? true;
   const headerParts = [
     section("Session Goal", data.sessionGoal),
+    section("User Preferences", data.userPreferences),
     section("Files And Changes", data.filesAndChanges),
     section("Commits", data.commits),
     section("Outstanding Context", data.outstandingContext),
-    section("User Preferences", data.userPreferences),
   ].filter(Boolean);
 
   const parts: string[] = [];
