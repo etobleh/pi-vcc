@@ -48,6 +48,15 @@ describe("normalize", () => {
     }]);
   });
 
+  it("normalizes tool result with isError flag", () => {
+    const msg = { role: "toolResult", toolName: "Read", content: "file not found", isError: true };
+    const blocks = normalize([msg as any]);
+    expect(blocks).toEqual([{
+      kind: "tool_result", name: "Read",
+      text: "file not found", isError: true, sourceIndex: 0,
+    }]);
+  });
+
   it("handles mixed message sequence", () => {
     const blocks = normalize([
       userMsg("fix it"),

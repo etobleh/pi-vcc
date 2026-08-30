@@ -33,6 +33,124 @@ describe("buildSections", () => {
     const r = buildSections({ blocks });
     expect(r.outstandingContext.length).toBeGreaterThan(0);
     expect(r.outstandingContext[0]).toContain("Tests are still failing");
+    expect(r.outstandingContext[0]).toContain("[WARN]");
+  });
+
+  it("captures bash non-zero exit codes with [ERROR]", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "bash", command: "cargo build", output: "error: could not compile dependencies", exitCode: 101 },
+    ];
+    const r = buildSections({ blocks });
+    expect(r.outstandingContext.length).toBeGreaterThan(0);
+    expect(r.outstandingContext[0]).toContain("[ERROR]");
+    expect(r.outstandingContext[0]).toContain("bash:exit 101");
+    expect(r.outstandingContext[0]).toContain("cargo build");
+    expect(r.outstandingContext[0]).toContain("could not compile");
+  });
+
+  it("captures typescript compiler errors and tags with [ERROR]", () => {
+    const blocks: NormalizedBlock[] = [
+      {
+        kind: "bash",
+        command: "tsc --noEmit",
+        output: "src/auth.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+        exitCode: 0,
+      },
+    ];
+    const r = buildSections({ blocks });
+    expect(r.outstandingContext.length).toBeGreaterThan(0);
+    expect(r.outstandingContext[0]).toContain("[ERROR]");
+    expect(r.outstandingContext[0]).toContain("[tsc]");
+    expect(r.outstandingContext[0]).toContain("TS2322");
+  });
+
+  it("retags tsc errors as [RESOLVED] when file is edited subsequently", () => {
+    const blocks: NormalizedBlock[] = [
+      {
+        kind: "bash",
+        command: "tsc --noEmit",
+        output: "src/auth.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+        exitCode: 1,
+      },
+      {
+        kind: "tool_call",
+        name: "Edit",
+        args: { path: "src/auth.ts" },
+      },
+      {
+        kind: "tool_result",
+        name: "Edit",
+        text: "ok",
+      },
+    ];
+    const r = buildSections({ blocks });
+    const tscItem = r.outstandingContext.find((c) => c.includes("[tsc]"));
+    expect(tscItem).toBeDefined();
+    expect(tscItem).toContain("[RESOLVED]");
+  });
+
+  it("captures empty grep and glob results with [INFO]", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "tool_call", name: "grep", args: { pattern: "verifyToken", path: "src/" } },
+      { kind: "tool_result", name: "grep", text: "No matches found", isError: false },
+      { kind: "tool_call", name: "glob", args: { pattern: "**/*.proto" } },
+      { kind: "tool_result", name: "glob", text: "No files matched.", isError: false },
+    ];
+    const r = buildSections({ blocks });
+    expect(r.outstandingContext.length).toBe(2);
+    expect(r.outstandingContext[0]).toContain("[INFO]");
+    expect(r.outstandingContext[0]).toContain('[no matches] grep "verifyToken"');
+    expect(r.outstandingContext[1]).toContain("[INFO]");
+    expect(r.outstandingContext[1]).toContain('[no matches] glob "**/*.proto"');
+  });
+
+  it("captures test failures in bash output as [WARN] [tests]", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "bash", command: "bun test", output: "2 failed\nFAIL auth.test.ts", exitCode: 1 },
+    ];
+    const r = buildSections({ blocks });
+    expect(r.outstandingContext.length).toBe(1);
+    expect(r.outstandingContext[0]).toContain("[WARN]");
+    expect(r.outstandingContext[0]).toContain("[tests]");
+    expect(r.outstandingContext[0]).toContain("2 failed");
+  });
+
+  it("respects the 8KB scan limit for errors in large bash output", () => {
+    const padding = "x".repeat(10_000) + "\n";
+    const blocks: NormalizedBlock[] = [
+      {
+        kind: "bash",
+        command: "cat large.log",
+        output: padding + "src/auth.ts(1,1): error TS2322: Type 'string' is not assignable to type 'number'.",
+        exitCode: 0,
+      },
+    ];
+    const r = buildSections({ blocks });
+    // Error is past 8KB limit, so it should not be picked up
+    expect(r.outstandingContext.length).toBe(0);
+  });
+
+  it("pairs empty search results only with the matching tool name (case-insensitive)", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "tool_call", name: "Grep", args: { pattern: "firstSearch" } },
+      { kind: "tool_call", name: "Glob", args: { glob: "*.ts" } },
+      { kind: "tool_result", name: "grep", text: "No matches found" },
+    ];
+    const r = buildSections({ blocks });
+    expect(r.outstandingContext.length).toBe(1);
+    expect(r.outstandingContext[0]).toContain('[no matches] grep "firstSearch"');
+    expect(r.outstandingContext[0]).not.toContain("*.ts");
+  });
+
+  it("caps outstanding context items at 8", () => {
+    const blocks: NormalizedBlock[] = Array.from({ length: 15 }, (_, i) => ({
+      kind: "tool_result",
+      name: `tool_${i}`,
+      text: `Error occurrence ${i}`,
+      isError: true,
+    }));
+    const r = buildSections({ blocks });
+    expect(r.outstandingContext.length).toBe(8);
   });
 
   it("brief transcript hides tool results", () => {

@@ -39,12 +39,14 @@ const normalizeOne = (msg: any, msgIndex?: number): NormalizedBlock[] => {
   }
 
   if (msg.role === "toolResult") {
-    return [{
+    const block: NormalizedBlock = {
       kind: "tool_result",
       name: msg.toolName,
       text: sanitize(textOf(msg.content)),
       sourceIndex: msgIndex,
-    }];
+    };
+    if (Boolean((msg as any).isError)) block.isError = true;
+    return [block];
   }
 
   if (msg.role === "assistant") {
