@@ -1,4 +1,11 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "ignore": ["tests/**", "scripts/**"]
+  "entry": ["tests/**/*.ts"],
+  "project": ["src/**/*.ts"],
+  "ignore": [".agents/**"],
+  "rules": {
+    "exports": "off",
+    "types": "off",
+    "duplicates": "off"
+  }
 }

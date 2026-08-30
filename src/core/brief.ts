@@ -26,8 +26,8 @@ const isNoiseUser = (text: string): boolean => {
 const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
 
 /** Check if segment is a word (Bun's isWordLike is unreliable for alphanumeric tokens) */
-const isWord = (seg: { segment: string; isWordLike: boolean }): boolean =>
-  seg.isWordLike || /[\p{L}\p{N}]/u.test(seg.segment);
+const isWord = (seg: { segment: string; isWordLike?: boolean }): boolean =>
+  Boolean(seg.isWordLike) || /[\p{L}\p{N}]/u.test(seg.segment);
 
 // Common stop words — don't count toward budget
 const STOP_WORDS = new Set([

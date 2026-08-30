@@ -20,6 +20,8 @@
     "lint:dead": "knip"
   },
   "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.84.0 <1.0.0",
+    "@earendil-works/pi-ai": ">=0.84.0 <1.0.0",
     "@earendil-works/pi-coding-agent": ">=0.84.0 <1.0.0",
     "typebox": ">=1.1.24 <2.0.0"
   },
@@ -27,5 +29,10 @@
     "extensions": [
       "./index.ts"
     ]
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "knip": "^6.33.0",
+    "typescript": "^7.0.2"
   }
 }
