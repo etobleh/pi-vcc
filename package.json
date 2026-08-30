@@ -15,7 +15,9 @@
     "url": "git+https://github.com/etobleh/pi-vcc.git"
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint:dead": "knip"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.84.0 <1.0.0",
