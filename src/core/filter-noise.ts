@@ -1,38 +1,41 @@
 import type { NormalizedBlock } from "../types";
 
-const NOISE_TOOLS = new Set([
-  "TodoWrite", "TodoRead", "ToolSearch", "WebSearch",
-  "AskUser", "ExitSpecMode", "GenerateDroid",
+export const DEFAULT_NOISE_TOOLS = new Set([
+  "vcc_recall",
 ]);
 
-const NOISE_STRINGS = [
-  "Continue from where you left off.",
-  "No response requested.",
-  "IMPORTANT: TodoWrite was not called yet.",
-];
+export const DEFAULT_NOISE_CUSTOM_TYPES = new Set([
+  "vcc-recall",
+  "pi-vcc-auto-continue",
+]);
 
-const XML_WRAPPER_RE = /<(system-reminder|ide_opened_file|command-message|context-window-usage)[^>]*>[\s\S]*?<\/\1>/g;
+export interface FilterNoiseOptions {
+  extraNoiseTools?: string[];
+  extraNoiseCustomTypes?: string[];
+}
 
-const isNoiseUserBlock = (text: string): boolean => {
-  const trimmed = text.trim();
-  if (NOISE_STRINGS.some((s) => trimmed.includes(s))) return true;
-  const stripped = trimmed.replace(XML_WRAPPER_RE, "").trim();
-  return stripped.length === 0;
-};
+export const filterNoise = (
+  blocks: NormalizedBlock[],
+  options: FilterNoiseOptions = {},
+): NormalizedBlock[] => {
+  const noiseTools = new Set([
+    ...DEFAULT_NOISE_TOOLS,
+    ...(options.extraNoiseTools ?? []).map((t) => t.toLowerCase()),
+  ]);
+  const noiseCustomTypes = new Set([
+    ...DEFAULT_NOISE_CUSTOM_TYPES,
+    ...(options.extraNoiseCustomTypes ?? []).map((t) => t.toLowerCase()),
+  ]);
 
-const cleanUserText = (text: string): string =>
-  text.replace(XML_WRAPPER_RE, "").trim();
-
-export const filterNoise = (blocks: NormalizedBlock[]): NormalizedBlock[] => {
   const out: NormalizedBlock[] = [];
   for (const b of blocks) {
-    if (b.kind === "tool_call" && NOISE_TOOLS.has(b.name)) continue;
-    if (b.kind === "tool_result" && NOISE_TOOLS.has(b.name)) continue;
+    if (b.kind === "tool_call" && b.name && noiseTools.has(b.name.toLowerCase())) continue;
+    if (b.kind === "tool_result" && b.name && noiseTools.has(b.name.toLowerCase())) continue;
+    if (b.kind === "custom" && b.customType && noiseCustomTypes.has(b.customType.toLowerCase())) continue;
     if (b.kind === "user") {
-      if (isNoiseUserBlock(b.text)) continue;
-      const cleaned = cleanUserText(b.text);
-      if (!cleaned) continue;
-      out.push({ kind: "user", text: cleaned });
+      const trimmed = b.text.trim();
+      if (!trimmed) continue;
+      out.push({ kind: "user", text: trimmed, sourceIndex: b.sourceIndex });
       continue;
     }
     out.push(b);

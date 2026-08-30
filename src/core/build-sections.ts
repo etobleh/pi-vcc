@@ -2,7 +2,7 @@ import type { FileOps, NormalizedBlock } from "../types";
 import { clip, clipSentence, nonEmptyLines } from "./content";
 import type { SectionData } from "../sections";
 import { extractGoals } from "../extract/goals";
-import { extractFiles } from "../extract/files";
+import { extractFiles, trimFileActivityCommonPrefix } from "../extract/files";
 import { extractPreferences, dedupPreferencesAgainstGoals } from "../extract/preferences";
 import { extractCommits, formatCommits } from "../extract/commits";
 import { buildBriefSections, stringifyBrief } from "./brief";
@@ -42,7 +42,8 @@ const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
 };
 
 const formatFileActivity = (blocks: NormalizedBlock[], fileOps?: FileOps): string[] => {
-  const act = extractFiles(blocks, fileOps);
+  const rawAct = extractFiles(blocks, fileOps);
+  const act = trimFileActivityCommonPrefix(rawAct);
   // Dedup: if already Modified, drop from Created (file existed before)
   for (const p of act.modified) act.created.delete(p);
   const lines: string[] = [];

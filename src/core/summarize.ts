@@ -7,9 +7,12 @@ import { formatSummary, capBrief, BRIEF_MAX_LINES, RECALL_NOTE, wrapLongLines } 
 import { selectRankedBriefBlocks, type BriefRankingOptions } from "./rank";
 
 export interface CompileInput {
-  messages: Message[];
+  messages: any[];
   previousSummary?: string;
   fileOps?: FileOps;
+  globalIndexMap?: Map<string, number>;
+  extraNoiseTools?: string[];
+  extraNoiseCustomTypes?: string[];
 }
 
 export interface RankedCompileInput extends CompileInput {
@@ -171,7 +174,17 @@ interface CompileWithBriefBlocksOptions {
 }
 
 const compileWithBriefBlocks = (input: CompileInput, options: CompileWithBriefBlocksOptions = {}): string => {
-  const blocks = filterNoise(normalize(input.messages));
+  const normalized = normalize(input.messages, input.globalIndexMap ? (item, i) => {
+    const entryId = item?.entry?.id ?? item?.id;
+    if (entryId && input.globalIndexMap) {
+      return input.globalIndexMap.get(entryId);
+    }
+    return undefined;
+  } : undefined);
+  const blocks = filterNoise(normalized, {
+    extraNoiseTools: input.extraNoiseTools,
+    extraNoiseCustomTypes: input.extraNoiseCustomTypes,
+  });
   const briefBlocks = options.briefBlocksFor?.(blocks);
   const data = buildSections({ blocks, briefBlocks, fileOps: input.fileOps });
   const fresh = formatSummary(data, { capBriefTranscript: options.capFreshBrief ?? true });

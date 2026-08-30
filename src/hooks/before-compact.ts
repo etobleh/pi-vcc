@@ -1,12 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { compileRanked } from "../core/summarize";
 import { parseKeepAndPrompt, PI_VCC_COMPACT_INSTRUCTION } from "../core/compact-args";
 import { loadSettings, type PiVccSettings } from "../core/settings";
 import { calibrateCharsPerToken, estimateMessageContentChars, estimateMessageContentTokens, estimateTokensFromChars } from "../core/token-estimate";
+import { buildGlobalIndexMap } from "../core/lineage";
+import { extractFiles } from "../extract/files";
+import { normalize } from "../core/normalize";
 import type { PiVccCompactionDetails } from "../details";
-import type { CompactionReason } from "../types";
+import type { CompactionReason, FileOps } from "../types";
 
 export { PI_VCC_COMPACT_INSTRUCTION } from "../core/compact-args";
 
@@ -34,26 +38,17 @@ export const OVERSIZED_TAIL_FACTOR = 2.5;
 
 let lastStats: CompactionStats | null = null;
 let lastCompactWasPiVcc = false;
+let lastCompactionInterrupted = false;
 let pendingFollowUpPrompt: string | null = null;
 let pendingAutoContinueTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Invisible auto-continue: resume the agent after compaction without polluting
-// the LLM context with a user-visible continue prompt. triggerInvisibleContinue
-// sends a custom message marked with a dedicated customType (content:[],
-// display:false, triggerTurn:true, deliverAs:'followUp') so Pi's queue/busy-state
-// stays coherent; the on('context') filter registered in registerBeforeCompactHook
-// removes that message (by customType ONLY) from the LLM payload — the model
-// simply continues from the compaction summary.
-//
-// Ported from monotykamary/pi-vcc branch 'tom'
-// (https://github.com/monotykamary/pi-vcc, MIT) — a pi-vcc derivative.
 export const AUTO_CONTINUE_CUSTOM_TYPE = "pi-vcc-auto-continue";
 
-export const triggerInvisibleContinue = (pi: ExtensionAPI): void => {
+export const triggerAutoContinue = (pi: ExtensionAPI): void => {
   pi.sendMessage(
     {
       customType: AUTO_CONTINUE_CUSTOM_TYPE,
-      content: [],
+      content: "Continue",
       display: false,
       details: undefined,
     },
@@ -64,8 +59,9 @@ export const triggerInvisibleContinue = (pi: ExtensionAPI): void => {
   );
 };
 
-const clearPendingAutoContinue = () => {
+export const triggerInvisibleContinue = triggerAutoContinue;
 
+const clearPendingAutoContinue = () => {
   if (pendingAutoContinueTimer) {
     clearTimeout(pendingAutoContinueTimer);
     pendingAutoContinueTimer = null;
@@ -77,7 +73,7 @@ const scheduleAutoContinue = (pi: any) => {
   pendingAutoContinueTimer = setTimeout(() => {
     pendingAutoContinueTimer = null;
     try {
-      triggerInvisibleContinue(pi);
+      triggerAutoContinue(pi);
     } catch {}
   }, 0);
 };
@@ -125,29 +121,48 @@ const parseCompactionInstructions = (customInstructions?: string): {
   keepUserTurns: number;
   keepUserTurnsExplicit: boolean;
   followUpPrompt: string | null;
+  hasCustomInstructions: boolean;
 } => {
   const trimmed = customInstructions?.trim();
+  if (!trimmed) {
+    return {
+      isPiVcc: false,
+      keepUserTurns: 1,
+      keepUserTurnsExplicit: false,
+      followUpPrompt: null,
+      hasCustomInstructions: false,
+    };
+  }
+
   if (trimmed === PI_VCC_COMPACT_INSTRUCTION) {
-    return { isPiVcc: true, keepUserTurns: 1, keepUserTurnsExplicit: false, followUpPrompt: null };
+    return {
+      isPiVcc: true,
+      keepUserTurns: 1,
+      keepUserTurnsExplicit: false,
+      followUpPrompt: null,
+      hasCustomInstructions: false,
+    };
   }
 
   const keepPrefix = `${PI_VCC_COMPACT_INSTRUCTION} `;
-  if (trimmed?.startsWith(keepPrefix)) {
+  if (trimmed.startsWith(keepPrefix)) {
     const parsed = parseKeepAndPrompt(trimmed.slice(keepPrefix.length));
     return {
       isPiVcc: true,
       keepUserTurns: parsed.keepUserTurns ?? 1,
       keepUserTurnsExplicit: parsed.keepUserTurnsExplicit,
-      followUpPrompt: null,
+      followUpPrompt: parsed.followUpPrompt || null,
+      hasCustomInstructions: false,
     };
   }
 
-  const parsed = parseKeepAndPrompt(customInstructions);
+  // Not a /pi-vcc instruction (e.g. user typed /compact <text>)
   return {
     isPiVcc: false,
-    keepUserTurns: parsed.keepUserTurns ?? 1,
-    keepUserTurnsExplicit: parsed.keepUserTurnsExplicit,
-    followUpPrompt: parsed.followUpPrompt || null,
+    keepUserTurns: 1,
+    keepUserTurnsExplicit: false,
+    followUpPrompt: null,
+    hasCustomInstructions: true,
   };
 };
 
@@ -158,7 +173,7 @@ const normalizeKeepUserTurns = (keepUserTurns: number): number => {
 
 const dbg = (settings: PiVccSettings, data: Record<string, unknown>) => {
   if (!settings.debug) return;
-  try { writeFileSync("/tmp/pi-vcc-debug.json", JSON.stringify(data, null, 2)); } catch {}
+  try { writeFileSync(join(tmpdir(), "pi-vcc-debug.json"), JSON.stringify(data, null, 2)); } catch {}
 };
 
 const previewContent = (content: unknown): string => {
@@ -178,15 +193,15 @@ const previewContent = (content: unknown): string => {
   return "";
 };
 
-interface EntryWithMessage {
+export interface EntryWithMessage {
   entry: { id: string; type: string };
-  message: { role: string; content: unknown };
+  message: { role: string; content: unknown; [key: string]: unknown };
 }
 
 // Convert a non-message entry that carries LLM-context text (custom_message /
 // branch_summary) into its agent-message form, mirroring pi-core's
 // createCustomMessage / createBranchSummaryMessage (not root-exported, so inlined).
-const toLiveMessage = (entry: any): { role: string; content: unknown; [key: string]: unknown } | null => {
+export const toLiveMessage = (entry: any): { role: string; content: unknown; [key: string]: unknown } | null => {
   if (entry.type === "message" && entry.message) return entry.message;
   if (entry.type === "custom_message") {
     return {
@@ -415,30 +430,13 @@ export interface ResolveSmartKeepResult {
 }
 
 /**
- * Estimate tail tokens for a given keep:N.
- * Returns null when keep would trigger compact-all (tail lost) or cancel,
- * so the resolver can stop growing instead of selecting a value that
- * discards the tail entirely.
- */
-const tailTokensForKeep = (branchEntries: any[], keepUserTurns: number, charsPerToken?: number): number | null => {
-  const cut = buildOwnCut(branchEntries, keepUserTurns);
-  if (!cut.ok || cut.compactAll) return null;
-  const idx = branchEntries.findIndex((e: any) => e.id === cut.firstKeptEntryId);
-  if (idx < 0) return null;
-  const kept = branchEntries.slice(idx).filter((e: any) => e.type === "message");
-  const chars = kept.reduce(
-    (sum: number, e: any) => sum + estimateMessageContentChars(e.message?.content),
-    0,
-  );
-  return estimateTokensFromChars(chars, charsPerToken);
-};
-
-/**
  * Resolve the effective keep:N.
  * - Explicit keep:N from the user is always respected.
  * - smartKeepTail=false → old behavior (default keep:1).
  * - smartKeepTail=true → if keep:1 tail <= minTokens, grow keep to the
  *   largest N whose tail stays <= maxTokens. Stops at compact-all boundary.
+ *
+ * Optimized O(N) calculation using cumulative token estimates over liveMessages.
  */
 export const resolveSmartKeepUserTurns = (opts: ResolveSmartKeepOptions): ResolveSmartKeepResult => {
   const minTokens = opts.minTokens ?? MIN_SMART_TAIL_TOKENS;
@@ -449,18 +447,42 @@ export const resolveSmartKeepUserTurns = (opts: ResolveSmartKeepOptions): Resolv
     return { keepUserTurns: baseKeep, smartAdjusted: false, fromKeep: baseKeep };
   }
 
-  const baseTokens = tailTokensForKeep(opts.branchEntries, baseKeep, opts.charsPerToken);
-  // base tail already above min (or unmeasurable / compact-all) → don't grow.
+  const live = collectLiveMessages(opts.branchEntries);
+  if (live.length <= 2) {
+    return { keepUserTurns: baseKeep, smartAdjusted: false, fromKeep: baseKeep };
+  }
+
+  const userIndices = live.reduce<number[]>((acc, e, i) => {
+    if (e.message.role === "user") acc.push(i);
+    return acc;
+  }, []);
+  const totalUserTurns = userIndices.length;
+
+  if (totalUserTurns === 0) {
+    return { keepUserTurns: baseKeep, smartAdjusted: false, fromKeep: baseKeep };
+  }
+
+  // Precompute suffix token sums from each message index to the end
+  const suffixTokens: number[] = new Array(live.length + 1).fill(0);
+  for (let i = live.length - 1; i >= 0; i--) {
+    suffixTokens[i] = suffixTokens[i + 1] + estimateMessageContentTokens(live[i].message.content, opts.charsPerToken);
+  }
+
+  const tokensForK = (k: number): number | null => {
+    const targetUserIdx = totalUserTurns - k;
+    if (targetUserIdx <= 0) return null; // compact-all or invalid cut
+    const cutIdx = userIndices[targetUserIdx];
+    return suffixTokens[cutIdx];
+  };
+
+  const baseTokens = tokensForK(baseKeep);
   if (baseTokens == null || baseTokens > minTokens) {
     return { keepUserTurns: baseKeep, smartAdjusted: false, fromKeep: baseKeep };
   }
 
-  const baseCut = buildOwnCut(opts.branchEntries, baseKeep);
-  const totalUserTurns = baseCut.ok ? baseCut.totalUserTurns : 0;
-
   let selected = baseKeep;
   for (let k = baseKeep + 1; k <= totalUserTurns; k++) {
-    const tokens = tailTokensForKeep(opts.branchEntries, k, opts.charsPerToken);
+    const tokens = tokensForK(k);
     if (tokens == null || tokens > maxTokens) break;
     selected = k;
   }
@@ -478,30 +500,33 @@ const REASON_MESSAGES: Record<OwnCutCancelReason, string> = {
 };
 
 export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
-  // Filter our invisible-continue marker out of the LLM context payload so the
-  // model just continues from the compaction summary (matched by customType ONLY).
-  pi.on("context", (event) => {
-    const messages = event.messages.filter((message) => {
-      if (message.role !== "custom") return true;
-      return message.customType !== AUTO_CONTINUE_CUSTOM_TYPE;
-    });
-    if (messages.length !== event.messages.length) return { messages };
-  });
-
   pi.on("before_agent_start", () => {
     clearPendingAutoContinue();
   });
 
   pi.on("session_before_compact", (event, ctx) => {
+    lastStats = null;
+    lastCompactWasPiVcc = false;
+    lastCompactionInterrupted = false;
+    pendingFollowUpPrompt = null;
+
     const { preparation, branchEntries, customInstructions } = event;
     const { reason, willRetry } = readCompactionEventContext(event);
     const settings = loadSettings();
 
     // Always handle explicit /pi-vcc marker.
-    // Otherwise, only handle when user opted in via settings.
-    const { isPiVcc, keepUserTurns, keepUserTurnsExplicit, followUpPrompt } = parseCompactionInstructions(customInstructions);
+    // Otherwise, only handle when user opted in via settings and no custom instructions were given.
+    const { isPiVcc, keepUserTurns, keepUserTurnsExplicit, followUpPrompt, hasCustomInstructions } = parseCompactionInstructions(customInstructions);
     pendingFollowUpPrompt = null;
-    if (!isPiVcc && !settings.overrideDefaultCompaction) return;
+    if (!isPiVcc) {
+      if (hasCustomInstructions) {
+        // Fall through to pi core's LLM compaction when custom instructions are present
+        return;
+      }
+      if (!settings.overrideDefaultCompaction) {
+        return;
+      }
+    }
 
     const calibrationCut = buildOwnCut(branchEntries as any[], 0);
     const calibrationMessageChars = calibrationCut.ok
@@ -605,9 +630,53 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
     }
 
     pendingFollowUpPrompt = followUpPrompt;
-    const agentMessages = ownCut.messages;
     const firstKeptEntryId = ownCut.firstKeptEntryId;
-    const messages = convertToLlm(agentMessages);
+
+    // Collect all session entries for global indexing (source of truth for #N)
+    const allSessionEntries = ctx?.sessionManager?.getEntries?.() ?? branchEntries;
+    const globalIndexMap = buildGlobalIndexMap(allSessionEntries as any[]);
+
+    // Determine live slice with entry metadata attached
+    const liveMessages = collectLiveMessages(branchEntries as any[]);
+    const cutIdx = ownCut.compactAll
+      ? liveMessages.length
+      : liveMessages.findIndex((e) => e.entry.id === firstKeptEntryId);
+    const messagesToSummarize: EntryWithMessage[] = cutIdx >= 0
+      ? liveMessages.slice(0, cutIdx)
+      : liveMessages;
+
+    // Find the last real conversation turn message (exclude custom, branchSummary, compaction)
+    let lastTurnMsg: any = undefined;
+    for (let i = liveMessages.length - 1; i >= 0; i--) {
+      const m = liveMessages[i]?.message;
+      if (!m) continue;
+      if (m.role !== "custom" && m.role !== "branchSummary") {
+        lastTurnMsg = m;
+        break;
+      }
+    }
+
+    // Check if the last conversation turn was an interrupted assistant turn (for auto-continue gating)
+    lastCompactionInterrupted = Boolean(
+      lastTurnMsg &&
+      !(lastTurnMsg.role === "assistant" && lastTurnMsg.stopReason === "stop")
+    );
+
+    // File operations: computed from own cut, unioning with preparation if cut points align
+    const normalizedToSummarize = normalize(messagesToSummarize);
+    const ownFileActivity = extractFiles(normalizedToSummarize);
+    const fileOps: FileOps = {
+      readFiles: [...ownFileActivity.read],
+      modifiedFiles: [...ownFileActivity.modified, ...ownFileActivity.created],
+    };
+    if (preparation.firstKeptEntryId === ownCut.firstKeptEntryId && preparation.fileOps) {
+      fileOps.readFiles = [...new Set([...(fileOps.readFiles ?? []), ...(preparation.fileOps.read ?? [])])];
+      fileOps.modifiedFiles = [...new Set([
+        ...(fileOps.modifiedFiles ?? []),
+        ...(preparation.fileOps.written ?? []),
+        ...(preparation.fileOps.edited ?? []),
+      ])];
+    }
 
     // Count kept messages and estimate tokens
     const keptIdx = (branchEntries as any[]).findIndex((e: any) => e.id === firstKeptEntryId);
@@ -619,7 +688,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       0,
     );
     lastStats = {
-      summarized: agentMessages.length,
+      summarized: messagesToSummarize.length,
       kept: keptEntries.length,
       keptUserTurns: ownCut.keptUserTurns,
       totalUserTurns: ownCut.totalUserTurns,
@@ -641,28 +710,18 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
     // budget is converted to a char budget via the session's calibrated
     // charsPerToken so the summary targets ~RANKED_BRIEF_BUDGET_TOKENS tokens
     // regardless of content density.
-    //
-    // The budget is SIZE-RELATIVE: it scales with transcript length between a
-    // floor (RANKED_BRIEF_BUDGET_TOKENS) and a ceiling (RANKED_BRIEF_CEILING_TOKENS)
-    // at RANKED_BRIEF_CHARS_PER_BLOCK per normalized block. Small/medium sessions
-    // stay at the floor (size parity with the old cap); very large transcripts --
-    // which carry far more high-value long-tail (edits, commands, tests) than the
-    // old 120-line brief could hold -- earn more budget up to the ceiling, while
-    // the ceiling keeps growth bounded (no return of the ~60% bloat).
-    // Audit (research/audit, 794 sessions, vs shipped master 0.3.18): SMALL/MED
-    // unchanged; LARGE bucket paired recall -5.0pp -> -2.3pp (median to parity),
-    // long-tail losers 100/369 -> 67/369; fact density stays ~1.4x master.
     const RANKED_BRIEF_BUDGET_TOKENS = 1100;
     const RANKED_BRIEF_CEILING_TOKENS = 2000;
     const RANKED_BRIEF_TOKENS_PER_BLOCK = 15;
     const summary = compileRanked({
-      messages,
+      messages: messagesToSummarize,
       previousSummary: preparation.previousSummary,
-      fileOps: {
-        readFiles: [...preparation.fileOps.read],
-        modifiedFiles: [...preparation.fileOps.written, ...preparation.fileOps.edited],
-      },
+      fileOps,
+      globalIndexMap,
+      extraNoiseTools: settings.noiseTools,
+      extraNoiseCustomTypes: settings.noiseCustomTypes,
       ranking: {
+        fileOps,
         maxBriefChars: Math.round(RANKED_BRIEF_BUDGET_TOKENS * tokenEstimate.charsPerToken),
         maxBriefCharsCeiling: Math.round(RANKED_BRIEF_CEILING_TOKENS * tokenEstimate.charsPerToken),
         briefCharsPerBlock: Math.round(RANKED_BRIEF_TOKENS_PER_BLOCK * tokenEstimate.charsPerToken),
@@ -670,9 +729,9 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
     });
 
     const branchIds = branchEntries.map((e: any) => e.id);
-    const cutIdx = branchIds.indexOf(firstKeptEntryId);
-    const cutWindow = cutIdx >= 0
-      ? branchEntries.slice(Math.max(0, cutIdx - 3), Math.min(branchEntries.length, cutIdx + 3)).map((e: any) => ({
+    const cutWindowIdx = branchIds.indexOf(firstKeptEntryId);
+    const cutWindow = cutWindowIdx >= 0
+      ? branchEntries.slice(Math.max(0, cutWindowIdx - 3), Math.min(branchEntries.length, cutWindowIdx + 3)).map((e: any) => ({
           id: e.id,
           type: e.type,
           role: e.type === "message" ? e.message?.role : undefined,
@@ -684,10 +743,9 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       usedOwnCut: true,
       budgetCut: ownCut.budgetCut,
       compaction: { reason, willRetry },
-      messagesToSummarize: agentMessages.length,
-      messagesPreviewHead: agentMessages.slice(0, 3).map((m: any) => ({ role: m.role, preview: previewContent(m.content) })),
-      messagesPreviewTail: agentMessages.slice(-3).map((m: any) => ({ role: m.role, preview: previewContent(m.content) })),
-      convertedMessages: messages.length,
+      messagesToSummarize: messagesToSummarize.length,
+      messagesPreviewHead: messagesToSummarize.slice(0, 3).map((m: any) => ({ role: m.message?.role, preview: previewContent(m.message?.content) })),
+      messagesPreviewTail: messagesToSummarize.slice(-3).map((m: any) => ({ role: m.message?.role, preview: previewContent(m.message?.content) })),
       firstKeptEntryId,
       cutWindow,
       tokensBefore: preparation.tokensBefore,
@@ -701,8 +759,10 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
       compactor: "pi-vcc",
       version: 1,
       sections: [...summary.matchAll(/^\[(.+?)\]/gm)].map((m) => m[1]),
-      sourceMessageCount: agentMessages.length,
+      sourceMessageCount: messagesToSummarize.length,
       previousSummaryUsed: Boolean(preparation.previousSummary),
+      readFiles: fileOps.readFiles,
+      modifiedFiles: fileOps.modifiedFiles,
       reason,
       willRetry,
     };
@@ -730,7 +790,9 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI) => {
     if (willRetry) return;
     const stats = lastStats;
     if (!stats) return;
-    const shouldContinueAfterAutoCompact = (reason === "threshold" || reason === "overflow") && loadSettings().continueAfterThresholdCompact;
+    const shouldContinueAfterAutoCompact = (reason === "threshold" || reason === "overflow")
+      && loadSettings().continueAfterThresholdCompact
+      && lastCompactionInterrupted;
     scheduleCompactionStatsNotify(ctx, stats);
     if (followUpPrompt) {
       try {

@@ -31,6 +31,16 @@ describe("extractFiles", () => {
     expect([...r.read]).toEqual(["x.ts"]);
     expect([...r.modified]).toEqual(["y.ts"]);
   });
+
+  it("preserves full canonical absolute paths in extractFiles (P1)", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "tool_call", name: "read", args: { path: "/repo/src/a.ts" } },
+      { kind: "tool_call", name: "edit", args: { path: "/repo/src/b.ts" } },
+    ];
+    const r = extractFiles(blocks);
+    expect([...r.read]).toEqual(["/repo/src/a.ts"]);
+    expect([...r.modified]).toEqual(["/repo/src/b.ts"]);
+  });
 });
 
 describe("settings defaults", () => {

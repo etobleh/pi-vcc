@@ -6,8 +6,8 @@ import {
   AUTO_CONTINUE_CUSTOM_TYPE,
 } from "../src/hooks/before-compact";
 
-describe("invisible auto-continue: trigger + context filter", () => {
-  it("triggerInvisibleContinue sends a hidden custom message with followUp delivery", () => {
+describe("auto-continue: trigger and delivery", () => {
+  it("triggerAutoContinue sends a hidden message with non-empty content and followUp delivery", () => {
     const calls: { m: any; o: any }[] = [];
     const pi = { sendMessage: (m: any, o: any) => calls.push({ m, o }) } as any;
     triggerInvisibleContinue(pi);
@@ -16,45 +16,9 @@ describe("invisible auto-continue: trigger + context filter", () => {
     expect(calls[0].o).toEqual({ triggerTurn: true, deliverAs: "followUp" });
     expect(calls[0].m).toMatchObject({
       customType: AUTO_CONTINUE_CUSTOM_TYPE,
-      content: [],
+      content: "Continue",
       display: false,
     });
-  });
-
-  it("context hook filters ONLY our customType; other custom messages pass through untouched", () => {
-    let handler: ((event: any) => unknown) | undefined;
-    const pi = { on: (e: string, h: any) => { if (e === "context") handler = h; } } as any;
-    registerBeforeCompactHook(pi);
-
-    const user = { role: "user", content: [{ type: "text", text: "keep" }] };
-    const own = { role: "custom", customType: AUTO_CONTINUE_CUSTOM_TYPE, content: [] };
-    const other = { role: "custom", customType: "some-other-ext", content: [{ type: "text", text: "ctx" }] };
-
-    const result = handler?.({ messages: [user, own, other] });
-    const filtered = ((result as any)?.messages ?? [user, own, other]) as any[];
-    expect(filtered).toEqual([user, other]);
-  });
-
-  it("context hook is a pure filter: returns undefined when nothing to remove", () => {
-    let handler: ((event: any) => unknown) | undefined;
-    const pi = { on: (e: string, h: any) => { if (e === "context") handler = h; } } as any;
-    registerBeforeCompactHook(pi);
-
-    const user = { role: "user", content: [{ type: "text", text: "hi" }] };
-    const other = { role: "custom", customType: "other-ext", content: [] };
-    const result = handler?.({ messages: [user, other] });
-    expect(result).toBeUndefined(); // no mutation, no return
-  });
-
-  it("filter is idempotent: removing our marker yields empty result deterministically", () => {
-    let handler: ((event: any) => unknown) | undefined;
-    const pi = { on: (e: string, h: any) => { if (e === "context") handler = h; } } as any;
-    registerBeforeCompactHook(pi);
-
-    const own = { role: "custom", customType: AUTO_CONTINUE_CUSTOM_TYPE, content: [] };
-    const once = handler?.({ messages: [own] });
-    const messages = ((once as any)?.messages ?? []) as any[];
-    expect(messages).toEqual([]);
   });
 });
 

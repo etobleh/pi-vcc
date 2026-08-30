@@ -84,9 +84,25 @@ describe("normalize", () => {
     ]);
   });
 
+  it("normalizes custom messages", () => {
+    const msg = { role: "custom", customType: "my-ext", content: "custom context" } as any;
+    const blocks = normalize([msg]);
+    expect(blocks).toEqual([
+      { kind: "custom", customType: "my-ext", text: "custom context", sourceIndex: 0 },
+    ]);
+  });
+
+  it("normalizes branchSummary messages", () => {
+    const msg = { role: "branchSummary", summary: "Branch summary text" } as any;
+    const blocks = normalize([msg]);
+    expect(blocks).toEqual([
+      { kind: "branch_summary", text: "Branch summary text", sourceIndex: 0 },
+    ]);
+  });
+
   it("skips truly unknown message roles gracefully", () => {
-    const custom = { role: "custom", content: "hello" } as any;
-    expect(normalize([custom])).toEqual([]);
+    const unknown = { role: "someUnknownRole", content: "hello" } as any;
+    expect(normalize([unknown])).toEqual([]);
   });
 });
 

@@ -3,7 +3,9 @@ import type { NormalizedBlock } from "../types";
 import { textOf } from "./content";
 import { sanitize } from "./sanitize";
 
-const normalizeOne = (msg: Message, msgIndex: number): NormalizedBlock[] => {
+const normalizeOne = (msg: any, msgIndex?: number): NormalizedBlock[] => {
+  if (!msg || typeof msg !== "object") return [];
+
   if (msg.role === "user") {
     const blocks: NormalizedBlock[] = [];
     const text = sanitize(textOf(msg.content));
@@ -19,10 +21,21 @@ const normalizeOne = (msg: Message, msgIndex: number): NormalizedBlock[] => {
   }
 
   if (msg.role === "bashExecution") {
-    const cmd = (msg as any).command ?? "";
-    const out = (msg as any).output ?? "";
-    const exit = (msg as any).exitCode;
+    const cmd = msg.command ?? "";
+    const out = msg.output ?? "";
+    const exit = msg.exitCode;
     return [{ kind: "bash", command: cmd, output: out, exitCode: exit, sourceIndex: msgIndex }];
+  }
+
+  if (msg.role === "custom") {
+    const customType = msg.customType ?? "";
+    const text = sanitize(textOf(msg.content));
+    return [{ kind: "custom", customType, text, sourceIndex: msgIndex }];
+  }
+
+  if (msg.role === "branchSummary") {
+    const text = sanitize(msg.summary ?? textOf(msg.content));
+    return [{ kind: "branch_summary", text, sourceIndex: msgIndex }];
   }
 
   if (msg.role === "toolResult") {
@@ -59,7 +72,23 @@ const normalizeOne = (msg: Message, msgIndex: number): NormalizedBlock[] => {
   return [];
 };
 
-export const normalize = (messages: Message[]): NormalizedBlock[] =>
-  messages.flatMap((msg, i) => normalizeOne(msg, i));
+export const normalize = (
+  messages: any[],
+  getSourceIndex?: (msgOrItem: any, index: number) => number | undefined,
+): NormalizedBlock[] =>
+  messages.flatMap((item, i) => {
+    const msg = item && typeof item === "object" && "message" in item ? item.message : item;
+    let sourceIndex: number | undefined;
+    if (typeof getSourceIndex === "function") {
+      sourceIndex = getSourceIndex(item, i);
+    } else if (item && typeof item === "object" && typeof item.sourceIndex === "number") {
+      sourceIndex = item.sourceIndex;
+    } else if (msg && typeof msg === "object" && typeof msg.sourceIndex === "number") {
+      sourceIndex = msg.sourceIndex;
+    } else {
+      sourceIndex = i;
+    }
+    return normalizeOne(msg, sourceIndex);
+  });
 
 

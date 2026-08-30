@@ -79,7 +79,7 @@ const asPathSet = (paths?: string[]): Set<string> => new Set((paths ?? []).filte
 
 const bashCommandFromBlock = (block: NormalizedBlock): string | undefined => {
   if (block.kind === "bash") return block.command;
-  if (block.kind === "tool_call" && /^bash$/i.test(block.name) && typeof block.args.command === "string") {
+  if (block.kind === "tool_call" && /^(bash|powershell)$/i.test(block.name) && typeof block.args.command === "string") {
     return block.args.command;
   }
   return undefined;
@@ -112,6 +112,8 @@ const scoreBlock = (
 
   if (block.kind === "user") add(ranked, 18, "user-turn");
   if (block.kind === "assistant") add(ranked, 10, "assistant-context");
+  if (block.kind === "custom") add(ranked, 10, "custom-message");
+  if (block.kind === "branch_summary") add(ranked, 12, "branch-summary");
   if (block.kind === "tool_result") add(ranked, 1, "tool-result-low-value");
 
   if (block.kind === "tool_call") {

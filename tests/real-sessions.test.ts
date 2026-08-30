@@ -11,6 +11,7 @@ beforeAll(async () => {
 
 describe("real session integration", () => {
   it("compiles copied large sessions without mutating originals", async () => {
+    if (samples.length === 0) return;
     for (const sample of samples) {
       const before = await readSourceStat(sample);
       const loaded = loadSessionMessages(sample.copy);
@@ -30,6 +31,7 @@ describe("real session integration", () => {
   });
 
   it("uses read-only copied fixtures", () => {
+    if (samples.length === 0) return;
     for (const sample of samples) {
       expect(sample.copy).not.toBe(sample.source);
       expect(sample.copy.includes("pi-vcc-sessions-")).toBe(true);

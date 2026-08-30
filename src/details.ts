@@ -6,6 +6,8 @@ export interface PiVccCompactionDetails {
   sections: string[];
   sourceMessageCount: number;
   previousSummaryUsed: boolean;
+  readFiles?: string[];
+  modifiedFiles?: string[];
   reason?: CompactionReason;
   willRetry?: boolean;
 }

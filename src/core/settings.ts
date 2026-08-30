@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { homedir } from "os";
 import { dirname, join } from "path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export const SETTINGS_PATH_DEFAULT = join(homedir(), ".pi", "agent", "pi-vcc-config.json");
-const settingsPath = (): string => process.env.PI_VCC_CONFIG_PATH ?? SETTINGS_PATH_DEFAULT;
+export const SETTINGS_PATH_DEFAULT = join(getAgentDir(), "pi-vcc-config.json");
+const settingsPath = (): string => process.env.PI_VCC_CONFIG_PATH ?? join(getAgentDir(), "pi-vcc-config.json");
 /** Backwards-compat export. Resolves at access time, not import time. */
 export const SETTINGS_PATH = settingsPath();
 
@@ -11,7 +11,6 @@ export interface PiVccSettings {
   /**
    * When true (default), pi-vcc handles ALL compactions:
    *   - /compact (no args)
-   *   - /compact <text>
    *   - auto threshold / overflow
    *   - /pi-vcc (always handled regardless)
    *
@@ -29,21 +28,22 @@ export interface PiVccSettings {
    */
   smartKeepTail: boolean;
   /**
-   * When true (default), pi-vcc asks the agent to continue after a successful
-   * automatic compaction (threshold, or overflow after the assistant already
-   * finished with stop). This avoids a UX cliff where the agent finishes a response,
-   * immediately compacts, and then stops instead of continuing the task.
-   * Overflow retry is still owned by pi-core via willRetry.
+   * When true (default false), pi-vcc asks the agent to continue after a successful
+   * automatic compaction if the turn was cut mid-work.
    */
   continueAfterThresholdCompact: boolean;
-  /** Write debug snapshot to /tmp/pi-vcc-debug.json on each compaction. */
+  /** Extra tool names to drop as noise during compaction. */
+  noiseTools?: string[];
+  /** Extra custom message types to drop as noise during compaction. */
+  noiseCustomTypes?: string[];
+  /** Write debug snapshot to <tmpdir>/pi-vcc-debug.json on each compaction. */
   debug: boolean;
 }
 
 export const DEFAULT_SETTINGS: PiVccSettings = {
   overrideDefaultCompaction: true,
   smartKeepTail: true,
-  continueAfterThresholdCompact: true,
+  continueAfterThresholdCompact: false,
   debug: false,
 };
 

@@ -26,8 +26,18 @@ export const extractCommits = (blocks: NormalizedBlock[]): CommitInfo[] => {
 
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
-    if (b.kind !== "tool_call" || b.name !== "bash") continue;
-    const cmd = typeof b.args.command === "string" ? b.args.command : "";
+    let cmd = "";
+    let directOutput = "";
+
+    if (b.kind === "bash") {
+      cmd = b.command ?? "";
+      directOutput = b.output ?? "";
+    } else if (b.kind === "tool_call" && /^(bash|powershell)$/i.test(b.name)) {
+      cmd = typeof b.args.command === "string" ? b.args.command : "";
+    } else {
+      continue;
+    }
+
     if (!/\bgit\s+commit\b/.test(cmd)) continue;
     const m = cmd.match(COMMIT_MSG_RE);
     if (!m) continue;
@@ -35,17 +45,32 @@ export const extractCommits = (blocks: NormalizedBlock[]): CommitInfo[] => {
     if (!message) continue;
 
     let hash: string | undefined;
-    // Look at next tool_result for hash
-    for (let j = i + 1; j < Math.min(blocks.length, i + 3); j++) {
-      const r = blocks[j];
-      if (r.kind !== "tool_result") continue;
-      // Common git commit output: `[branch <hash>] message` or `<branch> <hash>..<hash>`
-      const bracket = r.text.match(/\[\S+\s+([0-9a-f]{7,12})\]/);
-      if (bracket) { hash = bracket[1]; break; }
-      const range = r.text.match(/\b([0-9a-f]{7,12})\.\.([0-9a-f]{7,12})\b/);
-      if (range) { hash = range[2]; break; }
-      const plain = r.text.match(HASH_RE);
-      if (plain) { hash = plain[1]; break; }
+    if (directOutput) {
+      const bracket = directOutput.match(/\[\S+\s+([0-9a-f]{7,12})\]/);
+      if (bracket) hash = bracket[1];
+      else {
+        const range = directOutput.match(/\b([0-9a-f]{7,12})\.\.([0-9a-f]{7,12})\b/);
+        if (range) hash = range[2];
+        else {
+          const plain = directOutput.match(HASH_RE);
+          if (plain) hash = plain[1];
+        }
+      }
+    }
+
+    // Look at next tool_result for hash if not found
+    if (!hash) {
+      for (let j = i + 1; j < Math.min(blocks.length, i + 3); j++) {
+        const r = blocks[j];
+        if (r.kind !== "tool_result") continue;
+        // Common git commit output: `[branch <hash>] message` or `<branch> <hash>..<hash>`
+        const bracket = r.text.match(/\[\S+\s+([0-9a-f]{7,12})\]/);
+        if (bracket) { hash = bracket[1]; break; }
+        const range = r.text.match(/\b([0-9a-f]{7,12})\.\.([0-9a-f]{7,12})\b/);
+        if (range) { hash = range[2]; break; }
+        const plain = r.text.match(HASH_RE);
+        if (plain) { hash = plain[1]; break; }
+      }
     }
 
     // Dedup by message+hash

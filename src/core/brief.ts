@@ -102,7 +102,7 @@ const nextRenderableBlock = (blocks: NormalizedBlock[], index: number): Normaliz
 const isSegmentClosingAssistant = (blocks: NormalizedBlock[], index: number): boolean => {
   if (blocks[index]?.kind !== "assistant") return false;
   const next = nextRenderableBlock(blocks, index);
-  return !next || next.kind === "user";
+  return !next || next.kind === "user" || next.kind === "custom" || next.kind === "branch_summary";
 };
 
 // ── bash command compression ──
@@ -213,23 +213,38 @@ const compressBash = (raw: string): string => {
 // ── tool summary ──
 
 const TOOL_SUMMARY_FIELDS: Record<string, string> = {
-  Read: "file_path", Edit: "file_path", Write: "file_path",
-  read: "file_path", edit: "file_path", write: "file_path",
-  Glob: "pattern", Grep: "pattern",
+  read: "path",
+  write: "path",
+  edit: "path",
+  grep: "pattern",
+  find: "pattern",
+  ls: "path",
+  bash: "command",
+  powershell: "command",
+  glob: "pattern",
 };
 
 const toolOneLiner = (name: string, args: Record<string, unknown>): string => {
-  const field = TOOL_SUMMARY_FIELDS[name];
+  const lower = name.toLowerCase();
+  if (lower === "bash" || lower === "powershell") {
+    const raw = (args.command ?? args.description ?? "") as string;
+    const cmd = compressBash(raw);
+    return `* ${name} "${cmd}"`;
+  }
+  if (lower === "grep" || lower === "find") {
+    const pattern = typeof args.pattern === "string" ? args.pattern : typeof args.query === "string" ? args.query : "";
+    const path = extractPath(args);
+    if (pattern && path) return `* ${name} "${pattern}" in ${path}`;
+    if (pattern) return `* ${name} "${pattern}"`;
+    if (path) return `* ${name} in ${path}`;
+    return `* ${name}`;
+  }
+  const field = TOOL_SUMMARY_FIELDS[lower];
   if (field && typeof args[field] === "string") {
     return `* ${name} "${args[field] as string}"`;
   }
   const path = extractPath(args);
   if (path) return `* ${name} "${path}"`;
-  if (name === "bash" || name === "Bash") {
-    const raw = (args.command ?? args.description ?? "") as string;
-    const cmd = compressBash(raw);
-    return `* ${name} "${cmd}"`;
-  }
   if (typeof args.query === "string") {
     return `* ${name} "${clip(args.query as string, 60)}"`;
   }
@@ -287,6 +302,22 @@ export const buildBriefSections = (blocks: NormalizedBlock[]): BriefLine[] => {
           push("[user]", `$ ${cmd}${ref}`);
         }
         lastHeader = "[user]";
+        break;
+      }
+      case "custom": {
+        const text = truncateTokens(b.text, TRUNCATE_USER);
+        if (text) {
+          pushText(`[ext:${b.customType}]`, text);
+        }
+        lastHeader = `[ext:${b.customType}]`;
+        break;
+      }
+      case "branch_summary": {
+        const text = truncateTokens(b.text, TRUNCATE_USER);
+        if (text) {
+          pushText("[branch summary]", text);
+        }
+        lastHeader = "[branch summary]";
         break;
       }
       case "assistant": {

@@ -8,6 +8,10 @@ export const extractPath = (args: Record<string, unknown>): string | null => {
 };
 
 export const summarizeToolArgs = (args: Record<string, unknown>): string => {
+  if (typeof args.pattern === "string") {
+    const path = extractPath(args);
+    return path ? `pattern=${args.pattern}, path=${path}` : `pattern=${args.pattern}`;
+  }
   const path = extractPath(args);
   if (path) return `path=${path}`;
   if (typeof args.command === "string") return `command=${args.command}`;

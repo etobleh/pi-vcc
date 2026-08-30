@@ -12,14 +12,18 @@ export interface SessionSample {
 }
 
 const walk = async (dir: string): Promise<string[]> => {
-  const names = await readdir(dir, { withFileTypes: true });
-  const out: string[] = [];
-  for (const name of names) {
-    const path = join(dir, name.name);
-    if (name.isDirectory()) out.push(...await walk(path));
-    else if (name.isFile() && path.endsWith(".jsonl")) out.push(path);
+  try {
+    const names = await readdir(dir, { withFileTypes: true });
+    const out: string[] = [];
+    for (const name of names) {
+      const path = join(dir, name.name);
+      if (name.isDirectory()) out.push(...await walk(path));
+      else if (name.isFile() && path.endsWith(".jsonl")) out.push(path);
+    }
+    return out;
+  } catch {
+    return [];
   }
-  return out;
 };
 
 const pickLargest = async (limit: number): Promise<string[]> => {

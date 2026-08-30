@@ -24,3 +24,17 @@ export const getActiveLineageEntryIds = (sessionManager: LineageSessionManagerLi
     return new Set();
   }
 };
+
+export const buildGlobalIndexMap = (entries: any[]): Map<string, number> => {
+  const map = new Map<string, number>();
+  let messageIndex = 0;
+  for (const e of entries) {
+    if (e && e.type === "message" && e.message) {
+      if (e.id) {
+        map.set(e.id, messageIndex);
+      }
+      messageIndex++;
+    }
+  }
+  return map;
+};

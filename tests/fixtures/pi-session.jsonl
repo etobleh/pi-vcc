@@ -1,0 +1,14 @@
+{"type":"session","id":"sess-1","timestamp":"2026-08-30T10:00:00.000Z","cwd":"/repo"}
+{"id":"e1","type":"message","parentId":null,"timestamp":"2026-08-30T10:00:01.000Z","message":{"role":"user","content":"inspect the codebase"}}
+{"id":"e2","type":"message","parentId":"e1","timestamp":"2026-08-30T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc_1","name":"grep","arguments":{"pattern":"TODO","path":"src"}}]}}
+{"id":"e3","type":"message","parentId":"e2","timestamp":"2026-08-30T10:00:03.000Z","message":{"role":"toolResult","toolCallId":"tc_1","toolName":"grep","content":[{"type":"text","text":"src/auth.ts: TODO fix auth"}]}}
+{"id":"e4","type":"message","parentId":"e3","timestamp":"2026-08-30T10:00:04.000Z","message":{"role":"bashExecution","command":"git status","output":"On branch master\nnothing to commit","exitCode":0}}
+{"id":"e5","type":"custom_message","parentId":"e4","timestamp":"2026-08-30T10:00:05.000Z","customType":"vcc-recall","content":"RECALL DUMP: fix everything always","display":true}
+{"id":"e6","type":"compaction","parentId":"e5","timestamp":"2026-08-30T10:00:06.000Z","summary":"[Session Goal]\n- inspect the codebase\n\n---\n\n[user]\ninspect the codebase (#0)","firstKeptEntryId":"e7"}
+{"id":"e7","type":"branch_summary","parentId":"e6","timestamp":"2026-08-30T10:00:07.000Z","fromId":"fork-1","summary":"Explored alternative auth design"}
+{"id":"e8","type":"message","parentId":"e7","timestamp":"2026-08-30T10:00:08.000Z","message":{"role":"user","content":"implement JWT auth refactor"}}
+{"id":"e9","type":"message","parentId":"e8","timestamp":"2026-08-30T10:00:09.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc_2","name":"edit","arguments":{"path":"src/auth.ts"}}]}}
+{"id":"e10","type":"message","parentId":"e9","timestamp":"2026-08-30T10:00:10.000Z","message":{"role":"toolResult","toolCallId":"tc_2","toolName":"edit","content":[{"type":"text","text":"applied patch"}]}}
+{"id":"e11","type":"message","parentId":"e10","timestamp":"2026-08-30T10:00:11.000Z","message":{"role":"bashExecution","command":"git commit -m \"refactor auth to JWT\"","output":"[master 1a2b3c4] refactor auth to JWT","exitCode":0}}
+{"id":"e12","type":"message","parentId":"e11","timestamp":"2026-08-30T10:00:12.000Z","message":{"role":"user","content":"verify tests pass"}}
+{"id":"e13","type":"message","parentId":"e12","timestamp":"2026-08-30T10:00:13.000Z","message":{"role":"assistant","content":"All tests pass!","stopReason":"stop"}}
