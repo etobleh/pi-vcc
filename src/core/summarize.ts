@@ -146,7 +146,10 @@ const mergeHeaderSection = (header: string, prev: string, fresh: string): string
     const dropped = contentLines.slice(0, contentLines.length - CAP);
     const crumbs = dropped.map(extractBreadcrumb).filter(Boolean);
     const headerLine = `[${header}]`;
-    const allCrumbs = crumbs.length > 0 ? [...allBreadcrumbs, `- ...recall: ${crumbs.join(", ")}`] : allBreadcrumbs;
+    let allCrumbs = crumbs.length > 0 ? [...allBreadcrumbs, `- ...recall: ${crumbs.join(", ")}`] : allBreadcrumbs;
+    if (allCrumbs.length > 5) {
+      allCrumbs = allCrumbs.slice(-5);
+    }
     if (allCrumbs.length > 0) {
       return `${headerLine}\n${allCrumbs.join("\n")}\n${kept.join("\n")}`;
     }
