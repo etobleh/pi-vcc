@@ -27,6 +27,7 @@ const HEADER_NAMES = [
   "User Preferences",
   "Files And Changes",
   "Commits",
+  "Type Catalog",
   "Outstanding Context",
   "Earlier Turns",
 ];
@@ -115,8 +116,8 @@ const extractBreadcrumb = (line: string): string => {
 
 /** Merge a header section */
 const mergeHeaderSection = (header: string, prev: string, fresh: string): string => {
-  // Outstanding Context is volatile -- always use fresh only
-  if (header === "Outstanding Context") return fresh;
+  // Outstanding Context and Type Catalog are volatile -- always use fresh only
+  if (header === "Outstanding Context" || header === "Type Catalog") return fresh;
   if (!prev && !fresh) return "";
 
   // Files And Changes: merge by category (Modified/Created/Read), dedup paths

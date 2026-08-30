@@ -61,6 +61,7 @@ export const formatSummary = (data: SectionData, options: FormatSummaryOptions =
     section("User Preferences", data.userPreferences),
     section("Files And Changes", data.filesAndChanges),
     section("Commits", data.commits),
+    section("Type Catalog", data.typeCatalog ?? []),
     section("Outstanding Context", data.outstandingContext),
     section("Earlier Turns", data.turnSummaries ?? []),
   ].filter(Boolean);

@@ -8,6 +8,11 @@ export interface FileOps {
   createdFiles?: string[];
 }
 
+/** Pre-computed look-ahead index: maps tool_call index → nearest tool_result block. */
+export interface ToolResultIndex {
+  get(callIndex: number): Extract<NormalizedBlock, { kind: "tool_result" }> | null;
+}
+
 export type NormalizedBlock =
   | { kind: "user"; text: string; sourceIndex?: number }
   | { kind: "assistant"; text: string; sourceIndex?: number }

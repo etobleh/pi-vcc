@@ -1,9 +1,10 @@
-import type { FileOps, NormalizedBlock } from "../types";
+import type { FileOps, NormalizedBlock, ToolResultIndex } from "../types";
 import { clip, clipSentence, firstLine, nonEmptyLines } from "./content";
 import { extractPath } from "./tool-args";
 import type { SectionData } from "../sections";
 import { extractGoals } from "../extract/goals";
-import { extractFiles, trimFileActivityCommonPrefix } from "../extract/files";
+import { trimFileActivityCommonPrefix } from "../extract/files";
+import { extractFileAndSymbolData, type UnifiedExtractResult } from "../extract/shared-symbols";
 import { extractPreferences, dedupPreferencesAgainstGoals } from "../extract/preferences";
 import { extractCommits, formatCommits } from "../extract/commits";
 import { buildBriefSections, identifyTurns, stringifyBrief } from "./brief";
@@ -13,6 +14,7 @@ export interface BuildSectionsInput {
   briefBlocks?: NormalizedBlock[];
   /** Hook-provided file activity; authoritative for files touched before this compaction. */
   fileOps?: FileOps;
+  toolResultIndex?: ToolResultIndex;
 }
 
 const BLOCKER_RE =
@@ -200,9 +202,24 @@ const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
   });
 };
 
-const formatFileActivity = (blocks: NormalizedBlock[], fileOps?: FileOps): string[] => {
-  const rawAct = extractFiles(blocks, fileOps);
-  const act = trimFileActivityCommonPrefix(rawAct);
+const buildToolResultIndex = (blocks: NormalizedBlock[]): ToolResultIndex => {
+  const map = new Map<number, Extract<NormalizedBlock, { kind: "tool_result" }>>();
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].kind !== "tool_call") continue;
+    for (let j = i + 1; j < Math.min(blocks.length, i + 4); j++) {
+      if (blocks[j].kind === "tool_result") {
+        map.set(i, blocks[j] as Extract<NormalizedBlock, { kind: "tool_result" }>);
+        break;
+      }
+    }
+  }
+  return {
+    get: (callIndex: number) => map.get(callIndex) ?? null,
+  };
+};
+
+const formatFileActivityFromUnified = (data: UnifiedExtractResult): string[] => {
+  const act = trimFileActivityCommonPrefix(data.fileActivity);
   // Dedup: if already Modified, drop from Created (file existed before)
   for (const p of act.modified) act.created.delete(p);
   const lines: string[] = [];
@@ -217,8 +234,38 @@ const formatFileActivity = (blocks: NormalizedBlock[], fileOps?: FileOps): strin
   return lines;
 };
 
+const formatTypeCatalogFromUnified = (data: UnifiedExtractResult): string[] => {
+  const catalog = data.typeCatalog;
+  if (catalog.length === 0) return [];
+  const lines: string[] = [];
+  let totalSigs = 0;
+  const MAX_TOTAL_SIGS = 30;
+
+  const omittedFiles: string[] = [];
+  for (let i = 0; i < catalog.length; i++) {
+    const entry = catalog[i];
+    if (totalSigs >= MAX_TOTAL_SIGS) {
+      omittedFiles.push(entry.file);
+      continue;
+    }
+    lines.push(`${entry.file}:`);
+    for (const sig of entry.signatures) {
+      if (totalSigs >= MAX_TOTAL_SIGS) break;
+      lines.push(`  ${sig}`);
+      totalSigs++;
+    }
+  }
+  if (omittedFiles.length > 0) {
+    lines.push(`(${omittedFiles.length} more files with signatures omitted)`);
+  }
+
+  return lines;
+};
+
 export const buildSections = (input: BuildSectionsInput): SectionData => {
   const { blocks } = input;
+  const tri = input.toolResultIndex ?? buildToolResultIndex(blocks);
+  const fileAndSymbols = extractFileAndSymbolData(blocks, tri, input.fileOps);
   const briefSections = buildBriefSections(input.briefBlocks ?? blocks);
   const sessionGoal = extractGoals(blocks);
   const userPreferences = dedupPreferencesAgainstGoals(
@@ -228,9 +275,11 @@ export const buildSections = (input: BuildSectionsInput): SectionData => {
   return {
     sessionGoal,
     outstandingContext: extractOutstandingContext(blocks),
-    filesAndChanges: formatFileActivity(blocks, input.fileOps),
+    filesAndChanges: formatFileActivityFromUnified(fileAndSymbols),
     commits: formatCommits(extractCommits(blocks)),
     userPreferences,
+    typeCatalog: formatTypeCatalogFromUnified(fileAndSymbols),
+    symbolChanges: fileAndSymbols.symbolChanges,
     turnSummaries: identifyTurns(blocks).map((t) => t.summary),
     briefTranscript: stringifyBrief(briefSections),
   };
